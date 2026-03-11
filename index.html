@@ -1,0 +1,1974 @@
+<!--
+  @name         Resource Governor
+  @license      BSL 1.1 — See LICENSE.md
+  @description  Unified dashboard UI — bandwidth, CPU, and memory governor for Windows.
+  @author       Cloud Nimbus LLC
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Resource Governor</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #1e1b4b;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 0;
+      user-select: none;
+    }
+
+    /* ===== Admin Banner ===== */
+    .admin-banner {
+      display: none;
+      padding: 8px 16px;
+      background: #7f1d1d;
+      border-bottom: 1px solid #991b1b;
+      font-size: 12px;
+      color: #fca5a5;
+      cursor: pointer;
+      text-align: center;
+    }
+    .admin-banner:hover { background: #991b1b; }
+    .admin-banner button {
+      margin-left: 12px;
+      padding: 3px 10px;
+      border: 1px solid #ff8844;
+      border-radius: 4px;
+      background: transparent;
+      color: #ff8844;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .admin-banner button:hover { background: #4a2c1c; }
+
+    /* ===== Stats Bar (always visible) ===== */
+    .stats-bar {
+      display: flex;
+      gap: 20px;
+      padding: 10px 20px;
+      background: #1a1744;
+      border-bottom: 1px solid #312e81;
+      align-items: center;
+    }
+    .stat-item { display: flex; align-items: center; gap: 8px; }
+    .stat-label { font-size: 10px; color: #818cf8; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat-value { font-size: 15px; font-weight: 700; color: #c7d2fe; font-family: monospace; }
+    .stat-value.warn { color: #ef4444; }
+    .stat-bar-bg {
+      width: 70px; height: 5px;
+      background: #312e81;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .stat-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .stat-bar-fill.cpu { background: #818cf8; }
+    .stat-bar-fill.mem { background: #a78bfa; }
+    .stat-sep { width: 1px; height: 24px; background: #312e81; }
+    .stat-value.upload { color: #fb923c; }
+    .stat-value.download { color: #38bdf8; }
+
+    /* ===== Header ===== */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: #1e1b4b;
+    }
+    .header h1 { font-size: 18px; font-weight: 600; color: #fff; }
+    .header-right { display: flex; align-items: center; gap: 10px; }
+
+    /* ===== Top-level Tabs ===== */
+    .top-tabs {
+      display: flex;
+      gap: 2px;
+      padding: 0 20px;
+      background: #1e1b4b;
+      border-bottom: 1px solid #312e81;
+    }
+    .top-tab {
+      padding: 10px 20px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      color: #818cf8;
+      border: none;
+      background: transparent;
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+    }
+    .top-tab:hover { color: #c7d2fe; }
+    .top-tab.active {
+      color: #fff;
+      border-bottom-color: #4f46e5;
+      background: rgba(79, 70, 229, 0.1);
+    }
+
+    /* ===== Content Area ===== */
+    .content { padding: 16px 20px; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* ===== Buttons ===== */
+    .btn {
+      padding: 6px 14px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .btn-primary { background: #4f46e5; color: #fff; }
+    .btn-primary:hover { background: #6366f1; }
+    .btn-danger { background: #7f1d1d; color: #fca5a5; }
+    .btn-danger:hover { background: #991b1b; }
+    .btn-ghost { background: transparent; color: #9ca3af; border: 1px solid #374151; }
+    .btn-ghost:hover { background: #1f2937; color: #fff; }
+    .btn-success { background: #065f46; color: #6ee7b7; }
+    .btn-success:hover { background: #047857; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .btn-icon {
+      width: 30px; height: 30px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 6px; border: none; cursor: pointer;
+      background: transparent; color: #9ca3af; font-size: 16px;
+    }
+    .btn-icon:hover { background: #312e81; color: #fff; }
+
+    /* ===== Sections / Cards ===== */
+    .section {
+      background: #1a1744;
+      border: 1px solid #312e81;
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+    .section h2 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: #a5b4fc;
+    }
+
+    /* ===== Toggle switch ===== */
+    .master-toggle { display: flex; align-items: center; gap: 10px; }
+    .toggle-label { font-size: 13px; font-weight: 600; }
+    .toggle-label.on { color: #44cc44; }
+    .toggle-label.off { color: #cc4444; }
+
+    .switch {
+      position: relative;
+      width: 48px;
+      height: 26px;
+      cursor: pointer;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch .slider {
+      position: absolute;
+      inset: 0;
+      background: #4a1c1c;
+      border-radius: 26px;
+      transition: 0.3s;
+    }
+    .switch .slider:before {
+      content: '';
+      position: absolute;
+      height: 20px;
+      width: 20px;
+      left: 3px;
+      bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: 0.3s;
+    }
+    .switch input:checked + .slider { background: #1c6a1c; }
+    .switch input:checked + .slider:before { transform: translateX(22px); }
+
+    /* Small toggle for settings */
+    .toggle-sm {
+      position: relative; width: 40px; height: 22px; cursor: pointer;
+    }
+    .toggle-sm input { opacity: 0; width: 0; height: 0; }
+    .toggle-sm .slider {
+      position: absolute; inset: 0;
+      background: #374151; border-radius: 22px;
+      transition: 0.2s;
+    }
+    .toggle-sm .slider:before {
+      content: '';
+      position: absolute;
+      height: 16px; width: 16px;
+      left: 3px; bottom: 3px;
+      background: #9ca3af;
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .toggle-sm input:checked + .slider { background: #4f46e5; }
+    .toggle-sm input:checked + .slider:before {
+      transform: translateX(18px);
+      background: #a5b4fc;
+    }
+
+    /* ===== Tables ===== */
+    .table-container {
+      background: #1a1744;
+      border-radius: 8px;
+      border: 1px solid #312e81;
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      padding: 10px 12px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #818cf8;
+      background: #16133d;
+      border-bottom: 1px solid #312e81;
+    }
+    tbody tr { border-bottom: 1px solid #252252; transition: background 0.1s; }
+    tbody tr:hover { background: #252252; }
+    tbody td { padding: 8px 12px; font-size: 13px; }
+
+    .rule-active { color: #4ade80; }
+    .rule-inactive { color: #6b7280; }
+
+    /* ===== Process bar ===== */
+    .process-bar-bg {
+      width: 60px; height: 4px;
+      background: #252252;
+      border-radius: 2px;
+      overflow: hidden;
+      display: inline-block;
+      vertical-align: middle;
+      margin-left: 6px;
+    }
+    .process-bar-fill { height: 100%; border-radius: 2px; }
+
+    /* ===== Modals ===== */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 100;
+    }
+    .modal-overlay.open { display: flex; align-items: center; justify-content: center; }
+    .modal {
+      background: #1a1744;
+      border: 1px solid #312e81;
+      border-radius: 10px;
+      padding: 24px;
+      width: 440px;
+      max-width: 90vw;
+    }
+    .modal h2 { font-size: 16px; margin-bottom: 16px; color: #fff; }
+    .form-row { margin-bottom: 12px; }
+    .form-row label {
+      display: block;
+      font-size: 12px;
+      color: #818cf8;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .form-row input, .form-row select, .form-row textarea {
+      width: 100%;
+      padding: 8px 10px;
+      background: #16133d;
+      border: 1px solid #312e81;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 13px;
+      outline: none;
+    }
+    .form-row input:focus, .form-row select:focus, .form-row textarea:focus { border-color: #4f46e5; }
+    .form-hint { font-size: 11px; color: #6b7280; margin-top: 3px; }
+    .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+    /* ===== Presets ===== */
+    .preset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .preset-card {
+      background: #16133d;
+      border: 1px solid #312e81;
+      border-radius: 8px;
+      padding: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .preset-card:hover { border-color: #4f46e5; background: #252252; }
+    .preset-card.active { border-color: #44cc44; background: #1c3a2c; }
+    .preset-card h3 { font-size: 13px; color: #c7d2fe; margin-bottom: 4px; }
+    .preset-card p { font-size: 11px; color: #818cf8; line-height: 1.4; }
+
+    /* ===== BW-specific ===== */
+    .bw-presets {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .app-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+    .app-btn {
+      padding: 6px 12px;
+      border: 1px solid #312e81;
+      border-radius: 6px;
+      background: #16133d;
+      color: #c7d2fe;
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.15s;
+    }
+    .app-btn:hover { border-color: #fb923c; color: #fb923c; }
+    .app-btn.limited { border-color: #44cc44; color: #44cc44; background: #1c2a1c; }
+
+    /* Sliders */
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .slider-row label { font-size: 11px; color: #818cf8; min-width: 65px; }
+    .slider-row input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 5px;
+      border-radius: 3px;
+      background: #312e81;
+      outline: none;
+    }
+    .slider-row input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: #4f46e5;
+      cursor: pointer;
+    }
+    .slider-val {
+      min-width: 65px;
+      text-align: right;
+      font-size: 13px;
+      font-weight: 600;
+      color: #818cf8;
+    }
+
+    /* Claude configure */
+    .claude-section {
+      background: linear-gradient(135deg, #1e1650 0%, #1a1744 100%);
+      border: 2px solid #cc8844;
+    }
+    .claude-btn {
+      width: 100%;
+      padding: 14px 20px;
+      border: 2px solid #cc8844;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #2a1a00 0%, #1a1000 100%);
+      color: #ffcc88;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .claude-btn:hover { background: linear-gradient(135deg, #3a2a10 0%, #2a1a00 100%); border-color: #ffaa44; }
+    .claude-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .claude-btn.running { animation: pulse 1.5s infinite; }
+    @keyframes pulse {
+      0%, 100% { border-color: #cc8844; }
+      50% { border-color: #ffdd88; box-shadow: 0 0 15px rgba(255,170,68,0.3); }
+    }
+    .claude-status {
+      margin-top: 10px;
+      padding: 10px 14px;
+      background: #16133d;
+      border-radius: 8px;
+      font-size: 12px;
+      display: none;
+    }
+    .claude-status.show { display: block; }
+    .claude-status .speed-result { display: flex; gap: 20px; margin-bottom: 6px; }
+    .claude-status .speed-val { font-weight: 700; font-size: 16px; }
+    .claude-status .speed-val.up { color: #fb923c; }
+    .claude-status .speed-val.down { color: #38bdf8; }
+    .claude-status .limit-result { color: #44cc44; font-weight: 600; font-size: 14px; margin-top: 6px; }
+    .claude-pct-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+      font-size: 12px;
+      color: #999;
+    }
+    .claude-pct-row input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 5px;
+      border-radius: 3px;
+      background: #312e81;
+      outline: none;
+    }
+    .claude-pct-row input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: #cc8844;
+      cursor: pointer;
+    }
+
+    /* ===== Collapsible ===== */
+    .collapse-header {
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .collapse-header .arrow { font-size: 10px; color: #666; transition: transform 0.2s; }
+    .collapse-header.open .arrow { transform: rotate(90deg); }
+    .collapse-body { display: none; }
+    .collapse-body.open { display: block; }
+
+    /* ===== Form inline row ===== */
+    .form-inline-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 10px;
+      align-items: end;
+    }
+    .form-group {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .form-group label { font-size: 11px; color: #818cf8; font-weight: 500; }
+    .form-group input {
+      padding: 7px 10px;
+      border: 1px solid #312e81;
+      border-radius: 6px;
+      background: #16133d;
+      color: #e0e0e0;
+      font-size: 13px;
+      outline: none;
+    }
+    .form-group input:focus { border-color: #4f46e5; }
+    .form-group input::placeholder { color: #555; }
+
+    /* ===== Policy rows ===== */
+    .policy-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      background: #16133d;
+      border-radius: 6px;
+      margin-bottom: 4px;
+      font-size: 12px;
+    }
+    .policy-name { font-weight: 600; color: #c7d2fe; }
+    .policy-details { color: #818cf8; font-size: 11px; margin-top: 1px; }
+
+    /* ===== Settings ===== */
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+    }
+    .setting-label { font-size: 13px; color: #c7d2fe; }
+    .setting-row input[type="number"] {
+      width: 60px; padding: 4px 8px;
+      background: #16133d; border: 1px solid #312e81;
+      border-radius: 4px; color: #e0e0e0;
+      font-size: 13px; text-align: center;
+    }
+
+    /* ===== Launcher cards ===== */
+    .launcher-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .launcher-card {
+      background: #16133d;
+      border: 1px solid #312e81;
+      border-radius: 8px;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+      position: relative;
+    }
+    .launcher-card:hover { border-color: #4f46e5; background: #252252; }
+    .launcher-card .lc-name { font-size: 14px; font-weight: 600; color: #c7d2fe; margin-bottom: 2px; }
+    .launcher-card .lc-folder { font-size: 10px; color: #818cf8; word-break: break-all; }
+    .launcher-card .lc-actions {
+      position: absolute; top: 6px; right: 6px;
+      display: none; gap: 4px;
+    }
+    .launcher-card:hover .lc-actions { display: flex; }
+    .launcher-card .lc-actions button {
+      padding: 2px 6px;
+      border: 1px solid #555;
+      border-radius: 3px;
+      background: #1e1b4b;
+      color: #aaa;
+      font-size: 10px;
+      cursor: pointer;
+    }
+    .launcher-card .lc-actions button:hover { border-color: #ff6666; color: #ff6666; }
+    .add-launcher-form {
+      display: none;
+      background: #16133d;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .add-launcher-form.show { display: block; }
+
+    /* ===== Prompts ===== */
+    .prompt-input-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .prompt-input-row textarea {
+      flex: 1;
+      padding: 8px 10px;
+      border: 1px solid #312e81;
+      border-radius: 6px;
+      background: #16133d;
+      color: #e0e0e0;
+      font-size: 13px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      resize: vertical;
+      min-height: 60px;
+      outline: none;
+    }
+    .prompt-input-row textarea:focus { border-color: #4f46e5; }
+    .prompt-input-row textarea::placeholder { color: #555; }
+
+    .prompt-item {
+      background: #16133d;
+      border: 1px solid #312e81;
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      transition: all 0.15s;
+    }
+    .prompt-item:hover { border-color: #4f46e5; }
+    .prompt-item.status-queued { border-left: 3px solid #4f46e5; }
+    .prompt-item.status-in-progress { border-left: 3px solid #fb923c; }
+    .prompt-item.status-done { border-left: 3px solid #44cc44; opacity: 0.6; }
+    .prompt-item .pi-priority { display: flex; flex-direction: column; gap: 2px; min-width: 20px; }
+    .prompt-item .pi-priority button {
+      padding: 0; border: none; background: none;
+      color: #666; cursor: pointer; font-size: 12px; line-height: 1;
+    }
+    .prompt-item .pi-priority button:hover { color: #4f46e5; }
+    .prompt-item .pi-text {
+      flex: 1; font-size: 12px; color: #ccc;
+      white-space: pre-wrap; word-break: break-word; line-height: 1.4;
+    }
+    .prompt-item .pi-meta { font-size: 10px; color: #818cf8; margin-top: 4px; }
+    .prompt-item .pi-actions { display: flex; flex-direction: column; gap: 4px; min-width: 60px; }
+    .prompt-item .pi-actions button {
+      padding: 3px 8px;
+      border: 1px solid #312e81;
+      border-radius: 3px;
+      background: none;
+      color: #999;
+      font-size: 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .prompt-item .pi-actions button:hover { border-color: #4f46e5; color: #4f46e5; }
+    .prompt-item .pi-actions button.send-btn { border-color: #44cc44; color: #44cc44; }
+    .prompt-item .pi-actions button.send-btn:hover { background: #1c2a1c; }
+    .prompt-item .pi-actions button.done-btn { border-color: #888; color: #888; }
+
+    .prompt-filter-row { display: flex; gap: 6px; margin-bottom: 8px; }
+    .prompt-filter-row button {
+      padding: 4px 10px;
+      border: 1px solid #312e81;
+      border-radius: 4px;
+      background: none;
+      color: #818cf8;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .prompt-filter-row button.active { border-color: #4f46e5; color: #c7d2fe; background: rgba(79,70,229,0.15); }
+    .prompt-filter-row button:hover { border-color: #4f46e5; }
+    .prompt-count { font-size: 11px; color: #818cf8; margin-left: auto; }
+
+    .launcher-select {
+      padding: 3px 6px;
+      border: 1px solid #312e81;
+      border-radius: 3px;
+      background: #16133d;
+      color: #ccc;
+      font-size: 10px;
+      outline: none;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: #312e81;
+      color: #a5b4fc;
+      font-size: 10px;
+      margin-right: 3px;
+    }
+
+    /* ===== Log area ===== */
+    .log-area {
+      margin-top: 8px;
+      max-height: 80px;
+      overflow-y: auto;
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-size: 11px;
+      color: #555;
+      padding: 6px 8px;
+      background: #16133d;
+      border-radius: 6px;
+    }
+    .log-entry { margin-bottom: 1px; }
+    .log-success { color: #44aa44; }
+    .log-error { color: #ff4444; }
+
+    /* ===== Empty state ===== */
+    .empty-state {
+      text-align: center;
+      padding: 30px 20px;
+      color: #818cf8;
+    }
+    .empty-state h3 { font-size: 16px; margin-bottom: 8px; color: #c7d2fe; }
+
+    /* ===== Toast ===== */
+    .toast {
+      position: fixed;
+      bottom: 20px; right: 20px;
+      background: #312e81;
+      color: #c7d2fe;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      z-index: 999;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.2s;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    /* ===== Footer ===== */
+    .footer {
+      text-align: center;
+      padding: 10px 0 6px;
+      font-size: 11px;
+      color: #4338ca;
+      border-top: 1px solid #312e81;
+      margin: 12px 20px 0;
+    }
+    .footer a { color: #818cf8; text-decoration: none; }
+    .footer a:hover { color: #c7d2fe; }
+
+    .section-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .hint { font-size: 10px; color: #818cf8; margin-bottom: 8px; }
+
+    button.small-danger {
+      padding: 3px 8px;
+      border: 1px solid #663333;
+      border-radius: 4px;
+      background: transparent;
+      color: #ff6666;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    button.small-danger:hover { background: #4a1c1c; }
+  </style>
+</head>
+<body>
+
+  <!-- Admin Banner -->
+  <div class="admin-banner" id="adminBanner">
+    <span>Not running as Administrator — some limits may not apply.</span>
+    <button onclick="selfElevate()">Run as Admin</button>
+  </div>
+
+  <!-- Stats Bar -->
+  <div class="stats-bar">
+    <div class="stat-item">
+      <div>
+        <div class="stat-label">CPU</div>
+        <div class="stat-value" id="statCpu">0%</div>
+      </div>
+      <div class="stat-bar-bg"><div class="stat-bar-fill cpu" id="statCpuBar" style="width:0%"></div></div>
+    </div>
+    <div class="stat-item">
+      <div>
+        <div class="stat-label">Memory</div>
+        <div class="stat-value" id="statMem">0 / 0 GB</div>
+      </div>
+      <div class="stat-bar-bg"><div class="stat-bar-fill mem" id="statMemBar" style="width:0%"></div></div>
+    </div>
+    <div class="stat-sep"></div>
+    <div class="stat-item">
+      <div>
+        <div class="stat-label">Upload</div>
+        <div class="stat-value upload" id="statUpload">-- Mbps</div>
+      </div>
+    </div>
+    <div class="stat-item">
+      <div>
+        <div class="stat-label">Download</div>
+        <div class="stat-value download" id="statDownload">-- Mbps</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <div class="header">
+    <h1>Resource Governor</h1>
+    <div class="header-right">
+      <div class="master-toggle">
+        <span class="toggle-label" id="bwToggleLabel">BW: ON</span>
+        <label class="switch">
+          <input type="checkbox" id="bwMasterToggle" checked onchange="toggleBwMaster()">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <button class="btn-icon" onclick="openSettingsModal()" title="Settings">&#9881;</button>
+    </div>
+  </div>
+
+  <!-- Top-level Tabs -->
+  <div class="top-tabs">
+    <button class="top-tab active" data-tab="bandwidth" onclick="switchTopTab('bandwidth')">Bandwidth</button>
+    <button class="top-tab" data-tab="process" onclick="switchTopTab('process')">Process</button>
+    <button class="top-tab" data-tab="launchers" onclick="switchTopTab('launchers')">Launchers</button>
+    <button class="top-tab" data-tab="prompts" onclick="switchTopTab('prompts')">Prompts</button>
+  </div>
+
+  <!-- Content -->
+  <div class="content">
+
+    <!-- ============================================================ -->
+    <!-- BANDWIDTH TAB -->
+    <!-- ============================================================ -->
+    <div class="tab-panel active" id="panel-bandwidth">
+
+      <!-- Configure for Claude -->
+      <div class="section claude-section">
+        <h2 style="color: #ffcc88;">Configure for Claude</h2>
+        <p style="font-size: 12px; color: #999; margin-bottom: 10px;">
+          Runs a speed test, then limits Claude-related processes (node.exe, git, ssh, etc.) to a percentage of your upload speed.
+        </p>
+        <button class="claude-btn" id="claudeBtn" onclick="configureClaude()">
+          Configure for Claude
+        </button>
+        <div class="claude-pct-row">
+          <span>Upload cap:</span>
+          <input type="range" id="claudePct" min="10" max="90" step="5" value="50" oninput="document.getElementById('claudePctVal').textContent = this.value + '%'">
+          <span id="claudePctVal" style="min-width: 40px; text-align: right; font-weight: 600; color: #cc8844;">50%</span>
+          <span>of max</span>
+        </div>
+        <div class="claude-status" id="claudeStatus">
+          <div class="speed-result">
+            <div>Upload: <span class="speed-val up" id="claudeSpeedUp">--</span> Mbps</div>
+            <div>Download: <span class="speed-val down" id="claudeSpeedDown">--</span> Mbps</div>
+          </div>
+          <div class="limit-result" id="claudeLimitResult"></div>
+        </div>
+      </div>
+
+      <!-- Upload Presets -->
+      <div class="section">
+        <h2>Upload Limit Presets</h2>
+        <div class="bw-presets" style="margin-bottom: 10px;">
+          <div class="preset-card" data-preset="upload-only-light" onclick="bwApplyPreset('upload-only-light', this)">
+            <h3>Light</h3>
+            <p>10 Mbps upload</p>
+          </div>
+          <div class="preset-card" data-preset="upload-only-medium" onclick="bwApplyPreset('upload-only-medium', this)">
+            <h3>Medium</h3>
+            <p>5 Mbps upload</p>
+          </div>
+          <div class="preset-card" data-preset="upload-only-strict" onclick="bwApplyPreset('upload-only-strict', this)">
+            <h3>Strict</h3>
+            <p>2 Mbps upload</p>
+          </div>
+        </div>
+
+        <div class="collapse-header" onclick="toggleCollapse('balancedPresets', this)">
+          <span style="font-size: 12px; color: #818cf8;">Upload + Download presets</span>
+          <span class="arrow">&#9654;</span>
+        </div>
+        <div class="collapse-body" id="balancedPresets">
+          <div class="bw-presets" style="margin-top: 8px;">
+            <div class="preset-card" data-preset="balanced-light" onclick="bwApplyPreset('balanced-light', this)">
+              <h3>Balanced Light</h3>
+              <p>10 Up / 50 Down</p>
+            </div>
+            <div class="preset-card" data-preset="balanced-medium" onclick="bwApplyPreset('balanced-medium', this)">
+              <h3>Balanced Med</h3>
+              <p>5 Up / 20 Down</p>
+            </div>
+            <div class="preset-card" data-preset="balanced-strict" onclick="bwApplyPreset('balanced-strict', this)">
+              <h3>Balanced Strict</h3>
+              <p>2 Up / 10 Down</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick per-app upload limits -->
+      <div class="section">
+        <h2>Quick App Upload Limits (5 Mbps each)</h2>
+        <div class="app-buttons" id="appButtons">
+          <button class="app-btn" onclick="bwQuickLimit(this, 'node.exe')">node.exe</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'git.exe')">git.exe</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'git-remote-https.exe')">git-remote-https</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'cmd.exe')">cmd.exe</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'powershell.exe')">powershell.exe</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'pwsh.exe')">pwsh.exe</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'ssh.exe')">ssh.exe</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'scp.exe')">scp.exe</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'python.exe')">python.exe</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'code.exe')">VS Code</button>
+          <button class="app-btn" onclick="bwQuickLimit(this, 'WindowsTerminal.exe')">Windows Terminal</button>
+        </div>
+      </div>
+
+      <!-- Custom Rule -->
+      <div class="section">
+        <div class="collapse-header" onclick="toggleCollapse('bwCustomForm', this)">
+          <h2 style="margin: 0;">Custom Rule</h2>
+          <span class="arrow">&#9654;</span>
+        </div>
+        <div class="collapse-body" id="bwCustomForm">
+          <div style="margin-top: 10px;">
+            <div class="form-inline-row">
+              <div class="form-group">
+                <label>Rule Name</label>
+                <input type="text" id="bwRuleName" placeholder="e.g. terminal-limit" />
+              </div>
+              <div class="form-group">
+                <label>Application (blank = global)</label>
+                <input type="text" id="bwAppPath" placeholder="e.g. node.exe" />
+              </div>
+            </div>
+            <div class="slider-row">
+              <label>Upload</label>
+              <input type="range" id="bwUploadSlider" min="0" max="100" step="0.5" value="5" oninput="updateBwSlider('upload')">
+              <span class="slider-val" id="bwUploadVal">5 Mbps</span>
+            </div>
+            <div class="slider-row">
+              <label>Download</label>
+              <input type="range" id="bwDownloadSlider" min="0" max="100" step="0.5" value="0" oninput="updateBwSlider('download')">
+              <span class="slider-val" id="bwDownloadVal">No limit</span>
+            </div>
+            <button class="btn btn-primary" onclick="bwCreateRule()">Apply Rule</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Policies -->
+      <div class="section">
+        <div class="section-actions">
+          <h2 style="margin: 0;">Active Policies</h2>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-danger btn-sm" onclick="bwRemoveAll()">Remove All</button>
+            <button class="btn btn-ghost btn-sm" onclick="bwRefreshPolicies()">Refresh</button>
+          </div>
+        </div>
+        <div id="bwPoliciesList">
+          <div class="empty-state" style="padding:14px;">No active bandwidth policies</div>
+        </div>
+      </div>
+
+      <!-- BW Log -->
+      <div id="bwLogArea" class="log-area"></div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- PROCESS TAB -->
+    <!-- ============================================================ -->
+    <div class="tab-panel" id="panel-process">
+
+      <!-- Process sub-tabs -->
+      <div style="display:flex;gap:2px;margin-bottom:14px;background:#1a1744;border-radius:8px;padding:3px;width:fit-content;">
+        <button class="top-tab active" data-subtab="proc-rules" onclick="switchProcSubTab('proc-rules')" style="padding:6px 16px;border-bottom:none;">Rules</button>
+        <button class="top-tab" data-subtab="proc-presets" onclick="switchProcSubTab('proc-presets')" style="padding:6px 16px;border-bottom:none;">Presets</button>
+        <button class="top-tab" data-subtab="proc-explorer" onclick="switchProcSubTab('proc-explorer')" style="padding:6px 16px;border-bottom:none;">Processes</button>
+      </div>
+
+      <!-- Rules sub-panel -->
+      <div class="proc-subpanel active" id="subpanel-proc-rules">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:13px;color:#818cf8;" id="procRulesCount">0 rules</span>
+            <button class="btn btn-danger btn-sm" onclick="procStopAll()" id="procStopAllBtn" style="display:none">Stop All</button>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="openProcRuleModal()">+ New Rule</button>
+        </div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Name</th>
+                <th>Process</th>
+                <th>CPU Limit</th>
+                <th>Memory Limit</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="procRulesTable"></tbody>
+          </table>
+          <div class="empty-state" id="procRulesEmpty" style="display:none;">
+            <h3>No rules yet</h3>
+            <p>Create a rule or apply a preset to start limiting processes.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Presets sub-panel -->
+      <div class="proc-subpanel" id="subpanel-proc-presets" style="display:none;">
+        <p style="font-size:13px;color:#818cf8;margin-bottom:12px;">One-click profiles to limit common resource hogs.</p>
+        <div class="preset-grid" id="procPresetGrid"></div>
+      </div>
+
+      <!-- Process Explorer sub-panel -->
+      <div class="proc-subpanel" id="subpanel-proc-explorer" style="display:none;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <span style="font-size:13px;color:#818cf8;">Top processes by CPU time</span>
+          <button class="btn btn-ghost btn-sm" onclick="procRefreshProcesses()">Refresh</button>
+        </div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Process</th>
+                <th>PID</th>
+                <th>CPU Time (s)</th>
+                <th>Memory (MB)</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="procProcessTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- LAUNCHERS TAB -->
+    <!-- ============================================================ -->
+    <div class="tab-panel" id="panel-launchers">
+      <div class="section" style="border-color: #065f46;">
+        <div class="section-actions">
+          <h2 style="margin: 0; color: #6ee7b7;">Claude Quick Launch</h2>
+          <button class="btn btn-primary btn-sm" onclick="toggleAddLauncher()">+ Add Project</button>
+        </div>
+
+        <div class="add-launcher-form" id="addLauncherForm">
+          <div class="form-inline-row">
+            <div class="form-group">
+              <label>Project Name</label>
+              <input type="text" id="launcherName" placeholder="e.g. My App" />
+            </div>
+            <div class="form-group" style="flex: 2;">
+              <label>Folder</label>
+              <div style="display: flex; gap: 6px;">
+                <input type="text" id="launcherFolder" placeholder="C:\projects\my-app" style="flex:1" />
+                <button class="btn btn-primary btn-sm" onclick="browseLauncherFolder()">Browse</button>
+              </div>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>Claude Args (default: --dangerously-skip-permissions)</label>
+            <input type="text" id="launcherArgs" placeholder="--dangerously-skip-permissions" />
+          </div>
+          <div style="display: flex; gap: 8px; margin-top: 8px;">
+            <button class="btn btn-primary" onclick="saveLauncher()">Save Launcher</button>
+            <button class="btn btn-danger" onclick="toggleAddLauncher()">Cancel</button>
+          </div>
+        </div>
+
+        <div class="launcher-grid" id="launcherGrid">
+          <div class="empty-state" style="padding:14px;">No project launchers. Click "+ Add Project" to add one.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- PROMPTS TAB -->
+    <!-- ============================================================ -->
+    <div class="tab-panel" id="panel-prompts">
+      <div class="section" style="border-color: #4f46e5;">
+        <h2 style="color: #a5b4fc;">Prompt Backlog</h2>
+
+        <div class="prompt-input-row">
+          <textarea id="promptInput" placeholder="Type a prompt to add to the backlog...&#10;&#10;e.g. Refactor the auth module to use JWT tokens"></textarea>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <button class="btn btn-primary" onclick="addPrompt()" style="padding: 8px 14px;">Add</button>
+            <select id="promptTag" class="launcher-select" style="padding: 5px;">
+              <option value="">No tag</option>
+              <option value="feature">feature</option>
+              <option value="bugfix">bugfix</option>
+              <option value="refactor">refactor</option>
+              <option value="docs">docs</option>
+              <option value="test">test</option>
+              <option value="devops">devops</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="prompt-filter-row">
+          <button class="active" onclick="filterPrompts('all', this)">All</button>
+          <button onclick="filterPrompts('queued', this)">Queued</button>
+          <button onclick="filterPrompts('in-progress', this)">In Progress</button>
+          <button onclick="filterPrompts('done', this)">Done</button>
+          <span class="prompt-count" id="promptCount">0 prompts</span>
+        </div>
+
+        <div id="promptList">
+          <div class="empty-state" style="padding:14px;">No prompts in backlog. Add one above.</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- .content -->
+
+  <!-- Footer -->
+  <div class="footer">
+    Powered by <a href="https://cloudnimbusllc.com" target="_blank">Cloud Nimbus LLC</a>
+    &nbsp;|&nbsp; Free &amp; Open Source &nbsp;|&nbsp;
+    <a href="https://github.com/Nimba-Solutions/Resource-Governor" target="_blank">GitHub</a>
+  </div>
+
+  <!-- Process Rule Modal -->
+  <div class="modal-overlay" id="procRuleModal">
+    <div class="modal">
+      <h2 id="procRuleModalTitle">New Rule</h2>
+      <div class="form-row">
+        <label>Rule Name</label>
+        <input type="text" id="procRuleName" placeholder="e.g. Limit Node.js">
+      </div>
+      <div class="form-row">
+        <label>Process Name (without .exe)</label>
+        <input type="text" id="procRuleProcess" placeholder="e.g. node">
+        <div class="form-hint">Match by process name as shown in Task Manager</div>
+      </div>
+      <div class="form-row">
+        <label>CPU Limit (%)</label>
+        <input type="number" id="procRuleCpu" min="5" max="100" value="50" step="5">
+        <div class="form-hint">Restricts which CPU cores the process can use (5-100%)</div>
+      </div>
+      <div class="form-row">
+        <label>Memory Limit (MB) — 0 = no limit</label>
+        <input type="number" id="procRuleMemory" min="0" value="0" step="128">
+        <div class="form-hint">Sets max working set size for the process</div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="closeProcRuleModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveProcRule()">Save Rule</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal-overlay" id="settingsModal">
+    <div class="modal">
+      <h2>Settings</h2>
+      <div style="font-size:12px;color:#818cf8;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px;">Shared</div>
+      <div class="setting-row">
+        <span class="setting-label">Auto-refresh interval (seconds)</span>
+        <input type="number" id="settRefresh" min="1" max="60" value="3">
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Start minimized to tray</span>
+        <label class="toggle-sm">
+          <input type="checkbox" id="settMinimized">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Launch on Windows startup</span>
+        <label class="toggle-sm">
+          <input type="checkbox" id="settAutoStart">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <hr style="border-color:#312e81;margin:12px 0;">
+      <div style="font-size:12px;color:#818cf8;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px;">Bandwidth</div>
+      <div class="setting-row">
+        <span class="setting-label">Auto-apply bandwidth on launch</span>
+        <label class="toggle-sm">
+          <input type="checkbox" id="settBwAutoApply" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="slider-row" style="margin-top:4px;">
+        <label>Default Upload</label>
+        <input type="range" id="settDefaultUp" min="0" max="50" step="0.5" value="5" oninput="updateSettSlider()">
+        <span class="slider-val" id="settDefaultUpVal">5 Mbps</span>
+      </div>
+      <div class="hint">Upload limit applied automatically when the app starts (set to 0 to disable)</div>
+      <hr style="border-color:#312e81;margin:12px 0;">
+      <div style="font-size:12px;color:#818cf8;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px;">Process</div>
+      <div class="setting-row">
+        <span class="setting-label">Auto-apply process rules on launch</span>
+        <label class="toggle-sm">
+          <input type="checkbox" id="settProcAutoApply" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="closeSettingsModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveAllSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+<script>
+  // ============================================================
+  // STATE
+  // ============================================================
+  let bwEnabled = true;
+  let procRules = [];
+  let procActiveRuleIds = [];
+  let procPresets = {};
+  let processes = [];
+  let refreshTimer = null;
+  let editingProcRuleId = null;
+  let editingLauncherId = null;
+  let currentPromptFilter = 'all';
+
+  // ============================================================
+  // HELPERS
+  // ============================================================
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,'&#39;'); }
+  function escAttr(s) { return s.replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+  function log(msg, type = 'info') {
+    const el = document.getElementById('bwLogArea');
+    const e = document.createElement('div');
+    e.className = `log-entry ${type === 'error' ? 'log-error' : type === 'success' ? 'log-success' : ''}`;
+    e.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    el.prepend(e);
+    while (el.children.length > 50) el.removeChild(el.lastChild);
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2000);
+  }
+
+  function toggleCollapse(id, header) {
+    const body = document.getElementById(id);
+    body.classList.toggle('open');
+    header.classList.toggle('open');
+  }
+
+  // ============================================================
+  // TOP-LEVEL TABS
+  // ============================================================
+  function switchTopTab(tab) {
+    document.querySelectorAll('.top-tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
+    if (tab === 'process') {
+      procRefreshRules();
+    } else if (tab === 'launchers') {
+      refreshLaunchers();
+    } else if (tab === 'prompts') {
+      refreshPrompts();
+    }
+  }
+
+  // Process sub-tabs
+  function switchProcSubTab(subtab) {
+    document.querySelectorAll('[data-subtab]').forEach(t => t.classList.toggle('active', t.dataset.subtab === subtab));
+    document.querySelectorAll('.proc-subpanel').forEach(p => {
+      p.style.display = p.id === `subpanel-${subtab}` ? 'block' : 'none';
+    });
+    if (subtab === 'proc-explorer') procRefreshProcesses();
+  }
+
+  // ============================================================
+  // STATS BAR — runs continuously
+  // ============================================================
+  async function updateStatsBar() {
+    // System stats
+    try {
+      const stats = await window.api.procGetSystemStats();
+      const cpuEl = document.getElementById('statCpu');
+      cpuEl.textContent = stats.CPU + '%';
+      cpuEl.className = 'stat-value' + (stats.CPU > 80 ? ' warn' : '');
+      document.getElementById('statCpuBar').style.width = stats.CPU + '%';
+
+      const usedMem = (stats.TotalMemGB - stats.FreeMemGB).toFixed(1);
+      const memPercent = stats.TotalMemGB > 0 ? ((usedMem / stats.TotalMemGB) * 100).toFixed(0) : 0;
+      const memEl = document.getElementById('statMem');
+      memEl.textContent = `${usedMem} / ${stats.TotalMemGB} GB`;
+      memEl.className = 'stat-value' + (memPercent > 85 ? ' warn' : '');
+      document.getElementById('statMemBar').style.width = memPercent + '%';
+    } catch (e) {}
+
+    // Bandwidth
+    try {
+      const bw = await window.api.bwGetBandwidth();
+      if (bw && bw.length > 0) {
+        let totalUp = 0, totalDown = 0;
+        for (const d of bw) {
+          totalUp += parseFloat(d.uploadMbps) || 0;
+          totalDown += parseFloat(d.downloadMbps) || 0;
+        }
+        document.getElementById('statUpload').textContent = `${totalUp.toFixed(1)} Mbps`;
+        document.getElementById('statDownload').textContent = `${totalDown.toFixed(1)} Mbps`;
+      }
+    } catch (e) {}
+  }
+
+  function startAutoRefresh(seconds) {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(updateStatsBar, seconds * 1000);
+  }
+
+  // ============================================================
+  // BANDWIDTH — Master toggle
+  // ============================================================
+  async function toggleBwMaster() {
+    const enabled = await window.api.bwToggleEnabled();
+    updateBwToggleUI(enabled);
+    log(enabled ? 'Bandwidth limiting ENABLED' : 'Bandwidth limiting DISABLED', enabled ? 'success' : 'error');
+    bwRefreshPolicies();
+  }
+
+  function updateBwToggleUI(enabled) {
+    bwEnabled = enabled;
+    document.getElementById('bwMasterToggle').checked = enabled;
+    const label = document.getElementById('bwToggleLabel');
+    label.textContent = enabled ? 'BW: ON' : 'BW: OFF';
+    label.className = `toggle-label ${enabled ? 'on' : 'off'}`;
+  }
+
+  window.api.onBwEnabledChanged((enabled) => {
+    updateBwToggleUI(enabled);
+    bwRefreshPolicies();
+  });
+
+  // ============================================================
+  // BANDWIDTH — Configure for Claude
+  // ============================================================
+  async function configureClaude() {
+    const btn = document.getElementById('claudeBtn');
+    const status = document.getElementById('claudeStatus');
+    const pct = parseInt(document.getElementById('claudePct').value);
+
+    btn.disabled = true;
+    btn.classList.add('running');
+    btn.textContent = 'Running speed test...';
+    status.classList.add('show');
+    document.getElementById('claudeSpeedUp').textContent = '...';
+    document.getElementById('claudeSpeedDown').textContent = '...';
+    document.getElementById('claudeLimitResult').textContent = '';
+    log('Starting speed test for Claude configuration...');
+
+    try {
+      const result = await window.api.bwConfigureClaude(pct);
+      if (result.status === 'error') {
+        log(`Claude configure failed: ${result.message}`, 'error');
+        document.getElementById('claudeLimitResult').textContent = 'Failed: ' + result.message;
+        document.getElementById('claudeLimitResult').style.color = '#ff4444';
+      } else {
+        document.getElementById('claudeSpeedUp').textContent = result.speed.upload;
+        document.getElementById('claudeSpeedDown').textContent = result.speed.download;
+        document.getElementById('claudeLimitResult').textContent =
+          `Claude processes limited to ${result.limitMbps} Mbps upload (${result.percent}% of ${result.speed.upload} Mbps)`;
+        document.getElementById('claudeLimitResult').style.color = '#44cc44';
+        log(`Claude configured: ${result.limitMbps} Mbps upload limit (${result.percent}% of ${result.speed.upload} Mbps)`, 'success');
+        updateBwToggleUI(true);
+        bwRefreshPolicies();
+      }
+    } catch (e) {
+      log(`Error: ${e.message}`, 'error');
+    }
+
+    btn.disabled = false;
+    btn.classList.remove('running');
+    btn.textContent = 'Configure for Claude';
+  }
+
+  // ============================================================
+  // BANDWIDTH — Presets
+  // ============================================================
+  async function bwApplyPreset(name, el) {
+    log(`Applying preset: ${name}...`);
+    document.querySelectorAll('.bw-presets .preset-card').forEach(b => b.classList.remove('active'));
+    if (el) el.classList.add('active');
+    try {
+      await window.api.bwApplyPreset(name);
+      log('Preset applied', 'success');
+      updateBwToggleUI(true);
+      bwRefreshPolicies();
+    } catch (e) {
+      log(`Error: ${e.message}`, 'error');
+    }
+  }
+
+  // ============================================================
+  // BANDWIDTH — Quick app limit
+  // ============================================================
+  async function bwQuickLimit(btn, appName) {
+    if (btn.classList.contains('limited')) {
+      try {
+        await window.api.bwRemovePolicy(`App_${appName.replace('.exe', '')}`);
+        btn.classList.remove('limited');
+        log(`Removed limit on ${appName}`, 'success');
+        bwRefreshPolicies();
+      } catch (e) {
+        log(`Error: ${e.message}`, 'error');
+      }
+    } else {
+      try {
+        await window.api.bwQuickLimitApp(appName, 5);
+        btn.classList.add('limited');
+        log(`Limited ${appName} to 5 Mbps upload`, 'success');
+        bwRefreshPolicies();
+      } catch (e) {
+        log(`Error: ${e.message}`, 'error');
+      }
+    }
+  }
+
+  // ============================================================
+  // BANDWIDTH — Custom rule
+  // ============================================================
+  function updateBwSlider(type) {
+    const v = parseFloat(document.getElementById(`bw${type.charAt(0).toUpperCase() + type.slice(1)}Slider`).value);
+    document.getElementById(`bw${type.charAt(0).toUpperCase() + type.slice(1)}Val`).textContent = v === 0 ? 'No limit' : `${v} Mbps`;
+  }
+
+  async function bwCreateRule() {
+    const name = document.getElementById('bwRuleName').value.trim();
+    const appPath = document.getElementById('bwAppPath').value.trim();
+    const upload = parseFloat(document.getElementById('bwUploadSlider').value);
+    const download = parseFloat(document.getElementById('bwDownloadSlider').value);
+
+    if (!name) { log('Enter a rule name', 'error'); return; }
+    if (upload === 0 && download === 0) { log('Set at least one limit', 'error'); return; }
+
+    log(`Creating rule "${name}"...`);
+    try {
+      const result = await window.api.bwCreatePolicy({
+        name, appPath: appPath || null, uploadLimitMbps: upload, downloadLimitMbps: download,
+      });
+      for (const r of result) {
+        log(`${r.policy}: ${r.status}${r.message ? ' - ' + r.message : ''}`, r.status === 'created' ? 'success' : 'error');
+      }
+      bwRefreshPolicies();
+    } catch (e) {
+      log(`Error: ${e.message}`, 'error');
+    }
+  }
+
+  // ============================================================
+  // BANDWIDTH — Policy list
+  // ============================================================
+  async function bwRefreshPolicies() {
+    const container = document.getElementById('bwPoliciesList');
+    const saved = await window.api.bwGetPolicies();
+
+    if (saved.length === 0) {
+      container.innerHTML = '<div class="empty-state" style="padding:14px;">No active bandwidth policies</div>';
+      return;
+    }
+
+    container.innerHTML = saved.map(p => `
+      <div class="policy-row">
+        <div>
+          <div class="policy-name">${esc(p.name)}</div>
+          <div class="policy-details">
+            ${p.appPath ? `App: ${esc(p.appPath)} | ` : 'Global | '}
+            ${p.uploadLimitMbps ? `Up: ${p.uploadLimitMbps} Mbps` : ''}
+            ${p.uploadLimitMbps && p.downloadLimitMbps ? ' | ' : ''}
+            ${p.downloadLimitMbps ? `Down: ${p.downloadLimitMbps} Mbps` : ''}
+          </div>
+        </div>
+        <button class="small-danger" onclick="bwRemovePolicy('${escAttr(p.name)}')">Remove</button>
+      </div>
+    `).join('');
+
+    // Sync quick app buttons
+    document.querySelectorAll('.app-btn').forEach(btn => {
+      const appName = btn.textContent.trim();
+      const hasPolicy = saved.some(p => p.appPath === appName || p.appPath === appName.replace(' ', ''));
+      btn.classList.toggle('limited', hasPolicy);
+    });
+  }
+
+  async function bwRemovePolicy(name) {
+    log(`Removing "${name}"...`);
+    try {
+      await window.api.bwRemovePolicy(name);
+      log(`Removed "${name}"`, 'success');
+      bwRefreshPolicies();
+    } catch (e) {
+      log(`Error: ${e.message}`, 'error');
+    }
+  }
+
+  async function bwRemoveAll() {
+    log('Removing all limits...');
+    try {
+      await window.api.bwRemoveAll();
+      log('All limits removed', 'success');
+      document.querySelectorAll('.preset-card').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.app-btn').forEach(b => b.classList.remove('limited'));
+      bwRefreshPolicies();
+    } catch (e) {
+      log(`Error: ${e.message}`, 'error');
+    }
+  }
+
+  // ============================================================
+  // PROCESS — Rules
+  // ============================================================
+  async function procRefreshRules() {
+    procRules = await window.api.procGetRules();
+    procActiveRuleIds = await window.api.procGetActiveRules();
+    renderProcRules();
+    updateProcStatus();
+  }
+
+  function renderProcRules() {
+    const tbody = document.getElementById('procRulesTable');
+    const empty = document.getElementById('procRulesEmpty');
+    document.getElementById('procRulesCount').textContent = `${procRules.length} rule${procRules.length !== 1 ? 's' : ''}`;
+
+    if (procRules.length === 0) {
+      tbody.innerHTML = '';
+      empty.style.display = '';
+      return;
+    }
+    empty.style.display = 'none';
+
+    tbody.innerHTML = procRules.map(r => {
+      const isActive = procActiveRuleIds.includes(r.id);
+      return `<tr>
+        <td>
+          <span class="${isActive ? 'rule-active' : 'rule-inactive'}" style="font-weight:600">
+            ${isActive ? '&#9679; Active' : '&#9675; Stopped'}
+          </span>
+        </td>
+        <td style="font-weight:500;color:#c7d2fe">${esc(r.name)}</td>
+        <td style="font-family:monospace;color:#818cf8">${esc(r.processName)}</td>
+        <td>${r.cpuPercent < 100 ? r.cpuPercent + '%' : '<span style="color:#6b7280">None</span>'}</td>
+        <td>${r.memoryMb > 0 ? r.memoryMb + ' MB' : '<span style="color:#6b7280">None</span>'}</td>
+        <td>
+          <div style="display:flex;gap:4px;">
+            ${isActive
+              ? `<button class="btn btn-ghost btn-sm" onclick="procToggleRule('${r.id}', false)">Stop</button>`
+              : `<button class="btn btn-success btn-sm" onclick="procToggleRule('${r.id}', true)">Start</button>`
+            }
+            <button class="btn-icon" onclick="editProcRule('${r.id}')" title="Edit">&#9998;</button>
+            <button class="btn-icon" style="color:#f87171" onclick="deleteProcRule('${r.id}', '${esc(r.name)}')" title="Delete">&#10005;</button>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  function updateProcStatus() {
+    const stopBtn = document.getElementById('procStopAllBtn');
+    stopBtn.style.display = procActiveRuleIds.length > 0 ? '' : 'none';
+  }
+
+  async function procToggleRule(id, start) {
+    if (start) {
+      await window.api.procStartRule(id);
+      showToast('Rule started');
+    } else {
+      await window.api.procStopRule(id);
+      showToast('Rule stopped');
+    }
+    procActiveRuleIds = await window.api.procGetActiveRules();
+    renderProcRules();
+    updateProcStatus();
+  }
+
+  async function procStopAll() {
+    await window.api.procStopAll();
+    procActiveRuleIds = [];
+    renderProcRules();
+    updateProcStatus();
+    showToast('All rules stopped');
+  }
+
+  async function deleteProcRule(id, name) {
+    if (!confirm(`Delete rule "${name}"?`)) return;
+    await window.api.procRemoveRule(id);
+    procRules = await window.api.procGetRules();
+    procActiveRuleIds = await window.api.procGetActiveRules();
+    renderProcRules();
+    updateProcStatus();
+    showToast('Rule deleted');
+  }
+
+  // Process rule modal
+  function openProcRuleModal(ruleId) {
+    editingProcRuleId = ruleId || null;
+    const modal = document.getElementById('procRuleModal');
+    const title = document.getElementById('procRuleModalTitle');
+
+    if (ruleId) {
+      const r = procRules.find(x => x.id === ruleId);
+      if (!r) return;
+      title.textContent = 'Edit Rule';
+      document.getElementById('procRuleName').value = r.name;
+      document.getElementById('procRuleProcess').value = r.processName;
+      document.getElementById('procRuleCpu').value = r.cpuPercent || 50;
+      document.getElementById('procRuleMemory').value = r.memoryMb || 0;
+    } else {
+      title.textContent = 'New Rule';
+      document.getElementById('procRuleName').value = '';
+      document.getElementById('procRuleProcess').value = '';
+      document.getElementById('procRuleCpu').value = 50;
+      document.getElementById('procRuleMemory').value = 0;
+    }
+    modal.classList.add('open');
+    setTimeout(() => document.getElementById('procRuleName').focus(), 50);
+  }
+
+  function editProcRule(id) { openProcRuleModal(id); }
+  function closeProcRuleModal() {
+    document.getElementById('procRuleModal').classList.remove('open');
+    editingProcRuleId = null;
+  }
+
+  async function saveProcRule() {
+    const name = document.getElementById('procRuleName').value.trim();
+    const processName = document.getElementById('procRuleProcess').value.trim();
+    const cpuPercent = parseInt(document.getElementById('procRuleCpu').value) || 50;
+    const memoryMb = parseInt(document.getElementById('procRuleMemory').value) || 0;
+
+    if (!name || !processName) { showToast('Name and process are required'); return; }
+
+    const rule = { name, processName, cpuPercent, memoryMb };
+    if (editingProcRuleId) rule.id = editingProcRuleId;
+
+    await window.api.procSaveRule(rule);
+    procRules = await window.api.procGetRules();
+    renderProcRules();
+    closeProcRuleModal();
+    showToast(editingProcRuleId ? 'Rule updated' : 'Rule created');
+  }
+
+  // Process presets
+  async function loadProcPresets() {
+    procPresets = await window.api.procGetPresets();
+    renderProcPresets();
+  }
+
+  function renderProcPresets() {
+    const grid = document.getElementById('procPresetGrid');
+    const descriptions = {
+      'claude-light': 'Limit node.exe to 75% CPU. Keeps Claude Code running but leaves headroom.',
+      'claude-strict': 'Limit node.exe to 50% CPU + 2GB RAM, git to 50% CPU. Hard cap for heavy sessions.',
+      'build-tools': 'Cap node, msbuild, and cl.exe at 60% CPU. Keep your machine usable during builds.',
+      'background-apps': 'Limit OneDrive (25%), Teams (50%), Slack (50%). Stop background apps from stealing resources.',
+    };
+
+    grid.innerHTML = Object.entries(procPresets).map(([key, preset]) => {
+      const rulesSummary = preset.rules.map(r =>
+        `${r.processName}: ${r.cpuPercent}% CPU${r.memoryMb ? ', ' + r.memoryMb + 'MB' : ''}`
+      ).join(' / ');
+
+      return `<div class="preset-card" onclick="procApplyPreset('${key}')">
+        <h3>${esc(preset.name)}</h3>
+        <p>${descriptions[key] || rulesSummary}</p>
+      </div>`;
+    }).join('');
+  }
+
+  async function procApplyPreset(key) {
+    const result = await window.api.procApplyPreset(key);
+    if (result.status === 'ok') {
+      procRules = await window.api.procGetRules();
+      procActiveRuleIds = await window.api.procGetActiveRules();
+      renderProcRules();
+      updateProcStatus();
+      switchProcSubTab('proc-rules');
+      showToast('Preset applied');
+    } else {
+      showToast('Error: ' + result.message);
+    }
+  }
+
+  // Process explorer
+  async function procRefreshProcesses() {
+    processes = await window.api.procGetTopProcesses();
+    const tbody = document.getElementById('procProcessTable');
+
+    tbody.innerHTML = processes.map(p => {
+      const memWidth = Math.min(100, (p.memoryMb / 2048) * 100);
+      return `<tr>
+        <td style="font-weight:500">${esc(p.name)}</td>
+        <td style="font-family:monospace;color:#818cf8;font-size:12px">${p.pid}</td>
+        <td style="font-family:monospace">${p.cpuTime}s</td>
+        <td>
+          ${p.memoryMb} MB
+          <div class="process-bar-bg">
+            <div class="process-bar-fill" style="width:${memWidth}%;background:${memWidth > 80 ? '#ef4444' : '#a78bfa'}"></div>
+          </div>
+        </td>
+        <td>
+          <div style="display:flex;gap:4px;">
+            <button class="btn-icon" onclick="procQuickRule('${esc(p.name)}')" title="Create rule">&#9881;</button>
+            <button class="btn-icon" style="color:#f87171" onclick="killProc(${p.pid}, '${esc(p.name)}')" title="Kill">&#10005;</button>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  function procQuickRule(processName) {
+    document.getElementById('procRuleName').value = `Limit ${processName}`;
+    document.getElementById('procRuleProcess').value = processName;
+    document.getElementById('procRuleCpu').value = 50;
+    document.getElementById('procRuleMemory').value = 0;
+    editingProcRuleId = null;
+    document.getElementById('procRuleModalTitle').textContent = 'New Rule';
+    document.getElementById('procRuleModal').classList.add('open');
+  }
+
+  async function killProc(pid, name) {
+    if (!confirm(`Kill ${name} (PID ${pid})?`)) return;
+    const result = await window.api.killProcess(pid);
+    if (result.status === 'ok') {
+      showToast(`Killed ${name}`);
+      setTimeout(procRefreshProcesses, 500);
+    } else {
+      showToast('Failed: ' + result.message);
+    }
+  }
+
+  // Listen for rule changes from main process
+  window.api.onProcRulesChanged((ids) => {
+    procActiveRuleIds = ids;
+    renderProcRules();
+    updateProcStatus();
+  });
+
+  // ============================================================
+  // LAUNCHERS
+  // ============================================================
+  function toggleAddLauncher() {
+    const form = document.getElementById('addLauncherForm');
+    form.classList.toggle('show');
+    if (!form.classList.contains('show')) {
+      editingLauncherId = null;
+      document.getElementById('launcherName').value = '';
+      document.getElementById('launcherFolder').value = '';
+      document.getElementById('launcherArgs').value = '';
+    }
+  }
+
+  async function browseLauncherFolder() {
+    const folder = await window.api.browseFolder();
+    if (folder) document.getElementById('launcherFolder').value = folder;
+  }
+
+  async function saveLauncher() {
+    const name = document.getElementById('launcherName').value.trim();
+    const folder = document.getElementById('launcherFolder').value.trim();
+    const claudeArgs = document.getElementById('launcherArgs').value.trim() || '--dangerously-skip-permissions';
+
+    if (!name || !folder) { showToast('Name and folder are required'); return; }
+
+    const launcher = { name, folder, claudeArgs };
+    if (editingLauncherId) launcher.id = editingLauncherId;
+
+    await window.api.saveLauncher(launcher);
+    showToast(`Launcher "${name}" saved`);
+    toggleAddLauncher();
+    refreshLaunchers();
+  }
+
+  async function removeLauncher(id) {
+    await window.api.removeLauncher(id);
+    showToast('Launcher removed');
+    refreshLaunchers();
+  }
+
+  async function launchClaude(id) {
+    const result = await window.api.launchClaude(id);
+    if (result.status === 'ok') {
+      showToast(`Launched Claude in ${result.folder}`);
+    } else {
+      showToast(`Launch failed: ${result.message}`);
+    }
+  }
+
+  async function refreshLaunchers() {
+    const launchers = await window.api.getLaunchers();
+    const grid = document.getElementById('launcherGrid');
+
+    if (launchers.length === 0) {
+      grid.innerHTML = '<div class="empty-state" style="padding:14px;">No project launchers. Click "+ Add Project" to add one.</div>';
+      updateLauncherSelects(launchers);
+      return;
+    }
+
+    grid.innerHTML = launchers.map(l => `
+      <div class="launcher-card" ondblclick="launchClaude('${l.id}')">
+        <div class="lc-actions">
+          <button onclick="event.stopPropagation(); removeLauncher('${l.id}')">X</button>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <div>
+            <div class="lc-name">${esc(l.name)}</div>
+            <div class="lc-folder">${esc(l.folder)}</div>
+          </div>
+          <button onclick="event.stopPropagation(); launchClaude('${l.id}')" style="border: 1px solid #4ade80; background: none; color: #4ade80; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600;">Launch</button>
+        </div>
+      </div>
+    `).join('');
+
+    updateLauncherSelects(launchers);
+  }
+
+  function updateLauncherSelects(launchers) {
+    document.querySelectorAll('.launcher-select-prompt').forEach(sel => {
+      const current = sel.value;
+      sel.innerHTML = '<option value="">Send to...</option>' +
+        launchers.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('');
+      if (current) sel.value = current;
+    });
+  }
+
+  // ============================================================
+  // PROMPTS
+  // ============================================================
+  async function addPrompt() {
+    const text = document.getElementById('promptInput').value.trim();
+    const tag = document.getElementById('promptTag').value;
+    if (!text) { showToast('Enter a prompt'); return; }
+
+    await window.api.savePrompt({ text, tags: tag ? [tag] : [] });
+    document.getElementById('promptInput').value = '';
+    showToast('Prompt added');
+    refreshPrompts();
+  }
+
+  function filterPrompts(filter, btn) {
+    currentPromptFilter = filter;
+    document.querySelectorAll('.prompt-filter-row button').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    refreshPrompts();
+  }
+
+  async function movePrompt(id, direction) {
+    const prompts = await window.api.getPrompts();
+    const idx = prompts.findIndex(p => p.id === id);
+    if (idx < 0) return;
+    const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= prompts.length) return;
+    const ids = prompts.map(p => p.id);
+    [ids[idx], ids[swapIdx]] = [ids[swapIdx], ids[idx]];
+    await window.api.reorderPrompts(ids);
+    refreshPrompts();
+  }
+
+  async function markPromptStatus(id, status) {
+    await window.api.updatePromptStatus(id, status);
+    refreshPrompts();
+  }
+
+  async function deletePrompt(id) {
+    await window.api.removePrompt(id);
+    showToast('Prompt removed');
+    refreshPrompts();
+  }
+
+  async function sendPromptToLauncher(promptId, launcherId) {
+    const prompts = await window.api.getPrompts();
+    const prompt = prompts.find(p => p.id === promptId);
+    if (!prompt) return;
+
+    await window.api.updatePromptStatus(promptId, 'in-progress');
+    const result = await window.api.launchClaude(launcherId, prompt.text);
+    if (result.status === 'ok') {
+      showToast(`Sent prompt to Claude (copied to clipboard) in ${result.folder}`);
+    }
+    refreshPrompts();
+  }
+
+  async function refreshPrompts() {
+    const allPrompts = await window.api.getPrompts();
+    const launchers = await window.api.getLaunchers();
+    const filtered = currentPromptFilter === 'all' ? allPrompts : allPrompts.filter(p => p.status === currentPromptFilter);
+    const container = document.getElementById('promptList');
+    const countEl = document.getElementById('promptCount');
+
+    const queued = allPrompts.filter(p => p.status === 'queued').length;
+    const inProg = allPrompts.filter(p => p.status === 'in-progress').length;
+    countEl.textContent = `${allPrompts.length} total | ${queued} queued | ${inProg} active`;
+
+    if (filtered.length === 0) {
+      container.innerHTML = `<div class="empty-state" style="padding:14px;">${currentPromptFilter === 'all' ? 'No prompts in backlog.' : `No ${currentPromptFilter} prompts.`}</div>`;
+      return;
+    }
+
+    container.innerHTML = filtered.map((p) => `
+      <div class="prompt-item status-${p.status || 'queued'}">
+        <div class="pi-priority">
+          <button onclick="movePrompt('${p.id}', 'up')" title="Move up">&#9650;</button>
+          <button onclick="movePrompt('${p.id}', 'down')" title="Move down">&#9660;</button>
+        </div>
+        <div style="flex: 1;">
+          <div class="pi-text">${esc(p.text)}</div>
+          <div class="pi-meta">
+            ${(p.tags || []).map(t => '<span class="tag">' + esc(t) + '</span>').join('')}
+            ${p.status || 'queued'} | ${new Date(p.createdAt).toLocaleDateString()}
+            ${p.completedAt ? ' | done ' + new Date(p.completedAt).toLocaleDateString() : ''}
+          </div>
+        </div>
+        <div class="pi-actions">
+          ${launchers.length > 0 ? `
+            <select class="launcher-select launcher-select-prompt" onchange="if(this.value) sendPromptToLauncher('${p.id}', this.value)">
+              <option value="">Send to...</option>
+              ${launchers.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('')}
+            </select>
+          ` : ''}
+          ${p.status !== 'in-progress' ? `<button onclick="markPromptStatus('${p.id}', 'in-progress')">Start</button>` : ''}
+          ${p.status !== 'done' ? `<button class="done-btn" onclick="markPromptStatus('${p.id}', 'done')">Done</button>` : ''}
+          ${p.status === 'done' ? `<button onclick="markPromptStatus('${p.id}', 'queued')">Requeue</button>` : ''}
+          <button onclick="deletePrompt('${p.id}')" style="color: #ff6666; border-color: #663333;">Del</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // ============================================================
+  // SETTINGS
+  // ============================================================
+  function updateSettSlider() {
+    const v = parseFloat(document.getElementById('settDefaultUp').value);
+    document.getElementById('settDefaultUpVal').textContent = v === 0 ? 'Disabled' : `${v} Mbps`;
+  }
+
+  async function openSettingsModal() {
+    const settings = await window.api.getSettings();
+    document.getElementById('settRefresh').value = settings.refreshInterval || 3;
+    document.getElementById('settMinimized').checked = !!settings.startMinimized;
+    document.getElementById('settAutoStart').checked = !!settings.autoStart;
+
+    // We need to read bw/proc settings from the combined approach
+    // Settings modal uses the shared settings store, bw/proc settings are separate
+    document.getElementById('settBwAutoApply').checked = true; // default
+    document.getElementById('settProcAutoApply').checked = true; // default
+    document.getElementById('settDefaultUp').value = 5;
+    updateSettSlider();
+
+    document.getElementById('settingsModal').classList.add('open');
+  }
+
+  function closeSettingsModal() {
+    document.getElementById('settingsModal').classList.remove('open');
+  }
+
+  async function saveAllSettings() {
+    const refreshInterval = parseInt(document.getElementById('settRefresh').value) || 3;
+    const startMinimized = document.getElementById('settMinimized').checked;
+    const autoStart = document.getElementById('settAutoStart').checked;
+
+    await window.api.saveSettings({ refreshInterval, startMinimized, autoStart });
+
+    // Handle auto-start toggle
+    const currentSettings = await window.api.getSettings();
+    if (autoStart !== currentSettings.autoStart) {
+      await window.api.setAutoStart(autoStart);
+    }
+
+    startAutoRefresh(refreshInterval);
+    closeSettingsModal();
+    showToast('Settings saved');
+  }
+
+  async function selfElevate() {
+    await window.api.selfElevate();
+  }
+
+  // ============================================================
+  // INIT
+  // ============================================================
+  (async () => {
+    // Check admin
+    const isAdmin = await window.api.checkAdmin();
+    if (!isAdmin) {
+      document.getElementById('adminBanner').style.display = 'block';
+    }
+
+    // BW toggle state
+    const enabled = await window.api.bwGetEnabled();
+    updateBwToggleUI(enabled);
+
+    // Load settings
+    const settings = await window.api.getSettings();
+    startAutoRefresh(settings.refreshInterval || 3);
+
+    // Load process presets
+    await loadProcPresets();
+
+    // Initial data loads
+    await bwRefreshPolicies();
+    await procRefreshRules();
+    await refreshLaunchers();
+    await refreshPrompts();
+
+    // Start stats monitoring
+    updateStatsBar();
+
+    // Close modals on outside click
+    document.querySelectorAll('.modal-overlay').forEach(el => {
+      el.addEventListener('click', (e) => {
+        if (e.target === el) el.classList.remove('open');
+      });
+    });
+  })();
+</script>
+</body>
+</html>
