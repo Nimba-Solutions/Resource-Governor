@@ -373,7 +373,7 @@ async function runSpeedTest() {
     const dlResult = await new Promise((resolve, reject) => {
       const testSize = 10000000;
       exec(
-        `curl -s -o /dev/null -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=${testSize}"`,
+        `curl -s -o NUL -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=${testSize}"`,
         { windowsHide: true, timeout: 30000 },
         (err, stdout) => {
           if (err) return reject(err);
@@ -394,7 +394,7 @@ async function runSpeedTest() {
       fs.writeFileSync(tempFile, Buffer.alloc(2000000, 0x41));
 
       exec(
-        `curl -s -w "%{speed_upload}" -X POST -F "file=@${tempFile.replace(/\\/g, '/')}" "https://speed.cloudflare.com/__up" -o /dev/null`,
+        `curl -s -w "%{speed_upload}" -X POST -F "file=@${tempFile.replace(/\\/g, '/')}" "https://speed.cloudflare.com/__up" -o NUL`,
         { windowsHide: true, timeout: 30000 },
         (err, stdout) => {
           try { fs.unlinkSync(tempFile); } catch (e) {}
