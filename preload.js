@@ -18,7 +18,9 @@ contextBridge.exposeInMainWorld('api', {
   bwApplyPreset: (preset) => ipcRenderer.invoke('bw-apply-preset', { preset }),
   bwQuickLimitApp: (appName, uploadMbps) => ipcRenderer.invoke('bw-quick-limit-app', { appName, uploadMbps }),
   bwRunSpeedTest: () => ipcRenderer.invoke('bw-run-speed-test'),
-  bwConfigureClaude: (uploadCapPercent) => ipcRenderer.invoke('bw-configure-claude', { uploadCapPercent }),
+  bwConfigureClaude: (uploadCapPercent, forceSpeedTest) => ipcRenderer.invoke('bw-configure-claude', { uploadCapPercent, forceSpeedTest }),
+  getClaudeConfig: () => ipcRenderer.invoke('get-claude-config'),
+  quickSetup: (uploadCapPercent) => ipcRenderer.invoke('quick-setup', { uploadCapPercent }),
   onBwEnabledChanged: (cb) => ipcRenderer.on('bw-enabled-changed', (_, val) => cb(val)),
 
   // --- Process (proc-*) ---

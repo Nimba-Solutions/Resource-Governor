@@ -769,9 +769,9 @@
 
   <!-- Top-level Tabs -->
   <div class="top-tabs">
-    <button class="top-tab active" data-tab="bandwidth" onclick="switchTopTab('bandwidth')">Bandwidth</button>
+    <button class="top-tab active" data-tab="launchers" onclick="switchTopTab('launchers')">Launchers</button>
+    <button class="top-tab" data-tab="bandwidth" onclick="switchTopTab('bandwidth')">Bandwidth</button>
     <button class="top-tab" data-tab="process" onclick="switchTopTab('process')">Process</button>
-    <button class="top-tab" data-tab="launchers" onclick="switchTopTab('launchers')">Launchers</button>
     <button class="top-tab" data-tab="prompts" onclick="switchTopTab('prompts')">Prompts</button>
   </div>
 
@@ -781,7 +781,7 @@
     <!-- ============================================================ -->
     <!-- BANDWIDTH TAB -->
     <!-- ============================================================ -->
-    <div class="tab-panel active" id="panel-bandwidth">
+    <div class="tab-panel" id="panel-bandwidth">
 
       <!-- Configure for Claude -->
       <div class="section claude-section">
@@ -789,9 +789,13 @@
         <p style="font-size: 12px; color: #999; margin-bottom: 10px;">
           Runs a speed test, then limits Claude-related processes (node.exe, git, ssh, etc.) to a percentage of your upload speed.
         </p>
-        <button class="claude-btn" id="claudeBtn" onclick="configureClaude()">
-          Configure for Claude
-        </button>
+        <div style="display: flex; align-items: center;">
+          <button class="claude-btn" id="claudeBtn" onclick="configureClaude()" style="flex: 1;">
+            Configure for Claude
+          </button>
+          <button class="claude-btn" style="background: #333; border: 1px solid #555; margin-left: 8px; font-size: 11px; padding: 6px 12px; width: auto;" onclick="configureClaude(true)">Re-test Speed</button>
+        </div>
+        <div id="savedSpeedInfo" style="font-size: 11px; color: #888; margin-top: 4px;"></div>
         <div class="claude-pct-row">
           <span>Upload cap:</span>
           <input type="range" id="claudePct" min="10" max="90" step="5" value="50" oninput="document.getElementById('claudePctVal').textContent = this.value + '%'">
@@ -990,19 +994,22 @@
     <!-- ============================================================ -->
     <!-- LAUNCHERS TAB -->
     <!-- ============================================================ -->
-    <div class="tab-panel" id="panel-launchers">
+    <div class="tab-panel active" id="panel-launchers">
       <div class="section" style="border-color: #065f46;">
         <div class="section-actions">
           <h2 style="margin: 0; color: #6ee7b7;">Claude Quick Launch</h2>
           <button class="btn btn-primary btn-sm" onclick="toggleAddLauncher()">+ Add Project</button>
         </div>
 
+        <div style="margin-bottom: 12px;">
+          <button onclick="quickSetup()" style="width: 100%; padding: 14px 20px; border: none; border-radius: 10px; background: #22c55e; color: #fff; font-size: 16px; font-weight: 700; cursor: pointer; letter-spacing: 0.5px; transition: all 0.2s;">
+            Set Up &amp; Go
+          </button>
+          <div id="setupStatus" style="font-size: 11px; color: #888; margin-top: 4px;"></div>
+        </div>
+
         <div class="add-launcher-form" id="addLauncherForm">
           <div class="form-inline-row">
-            <div class="form-group">
-              <label>Project Name</label>
-              <input type="text" id="launcherName" placeholder="e.g. My App" />
-            </div>
             <div class="form-group" style="flex: 2;">
               <label>Folder</label>
               <div style="display: flex; gap: 6px;">
@@ -1010,10 +1017,10 @@
                 <button class="btn btn-primary btn-sm" onclick="browseLauncherFolder()">Browse</button>
               </div>
             </div>
-          </div>
-          <div class="form-row">
-            <label>Claude Args (default: --dangerously-skip-permissions)</label>
-            <input type="text" id="launcherArgs" placeholder="--dangerously-skip-permissions" />
+            <div class="form-group">
+              <label>Project Name</label>
+              <input type="text" id="launcherName" placeholder="Auto-filled from folder" />
+            </div>
           </div>
           <div style="display: flex; gap: 8px; margin-top: 8px;">
             <button class="btn btn-primary" onclick="saveLauncher()">Save Launcher</button>
@@ -1290,24 +1297,55 @@
   });
 
   // ============================================================
+  // QUICK SETUP
+  // ============================================================
+  async function quickSetup() {
+    const btn = document.querySelector('[onclick="quickSetup()"]');
+    const status = document.getElementById('setupStatus');
+    btn.disabled = true;
+    btn.textContent = 'Setting up...';
+    status.textContent = 'Running speed test and configuring...';
+
+    try {
+      const pct = parseInt(document.getElementById('claudePct').value) || 50;
+      const result = await window.api.quickSetup(pct);
+      if (result.status === 'ok') {
+        status.textContent = `Done! Limiting to ${result.limitMbps} Mbps upload. Auto-start enabled. Minimizing...`;
+        status.style.color = '#44cc44';
+        log(`Quick setup complete: ${result.limitMbps} Mbps limit, auto-start ON`, 'success');
+        updateBwToggleUI(true);
+        bwRefreshPolicies();
+      } else {
+        status.textContent = 'Setup failed: ' + result.message;
+        status.style.color = '#ff4444';
+      }
+    } catch (e) {
+      status.textContent = 'Error: ' + e.message;
+      status.style.color = '#ff4444';
+    }
+    btn.disabled = false;
+    btn.textContent = 'Set Up & Go';
+  }
+
+  // ============================================================
   // BANDWIDTH — Configure for Claude
   // ============================================================
-  async function configureClaude() {
+  async function configureClaude(forceRetest) {
     const btn = document.getElementById('claudeBtn');
     const status = document.getElementById('claudeStatus');
     const pct = parseInt(document.getElementById('claudePct').value);
 
     btn.disabled = true;
     btn.classList.add('running');
-    btn.textContent = 'Running speed test...';
+    btn.textContent = forceRetest ? 'Re-testing speed...' : 'Configuring...';
     status.classList.add('show');
     document.getElementById('claudeSpeedUp').textContent = '...';
     document.getElementById('claudeSpeedDown').textContent = '...';
     document.getElementById('claudeLimitResult').textContent = '';
-    log('Starting speed test for Claude configuration...');
+    log(forceRetest ? 'Re-running speed test...' : 'Configuring Claude (using saved speed if available)...');
 
     try {
-      const result = await window.api.bwConfigureClaude(pct);
+      const result = await window.api.bwConfigureClaude(pct, !!forceRetest);
       if (result.status === 'error') {
         log(`Claude configure failed: ${result.message}`, 'error');
         document.getElementById('claudeLimitResult').textContent = 'Failed: ' + result.message;
@@ -1315,12 +1353,14 @@
       } else {
         document.getElementById('claudeSpeedUp').textContent = result.speed.upload;
         document.getElementById('claudeSpeedDown').textContent = result.speed.download;
+        const savedNote = result.usedSavedSpeed ? ' (using saved speed)' : '';
         document.getElementById('claudeLimitResult').textContent =
-          `Claude processes limited to ${result.limitMbps} Mbps upload (${result.percent}% of ${result.speed.upload} Mbps)`;
+          `Claude processes limited to ${result.limitMbps} Mbps upload (${result.percent}% of ${result.speed.upload} Mbps)${savedNote}`;
         document.getElementById('claudeLimitResult').style.color = '#44cc44';
-        log(`Claude configured: ${result.limitMbps} Mbps upload limit (${result.percent}% of ${result.speed.upload} Mbps)`, 'success');
+        log(`Claude configured: ${result.limitMbps} Mbps upload limit${savedNote}`, 'success');
         updateBwToggleUI(true);
         bwRefreshPolicies();
+        updateSavedSpeedInfo();
       }
     } catch (e) {
       log(`Error: ${e.message}`, 'error');
@@ -1329,6 +1369,19 @@
     btn.disabled = false;
     btn.classList.remove('running');
     btn.textContent = 'Configure for Claude';
+  }
+
+  async function updateSavedSpeedInfo() {
+    const info = document.getElementById('savedSpeedInfo');
+    if (!info) return;
+    const config = await window.api.getClaudeConfig();
+    if (config && config.speed) {
+      const date = new Date(config.testedAt).toLocaleDateString();
+      info.textContent = `Saved: ${config.speed.upload} Mbps up / ${config.speed.download} Mbps down (tested ${date}) — ${config.limitMbps} Mbps limit at ${config.percent}%`;
+      info.style.color = '#888';
+    } else {
+      info.textContent = 'No saved speed test — will run on first configure.';
+    }
   }
 
   // ============================================================
@@ -1702,19 +1755,26 @@
       editingLauncherId = null;
       document.getElementById('launcherName').value = '';
       document.getElementById('launcherFolder').value = '';
-      document.getElementById('launcherArgs').value = '';
     }
   }
 
   async function browseLauncherFolder() {
     const folder = await window.api.browseFolder();
-    if (folder) document.getElementById('launcherFolder').value = folder;
+    if (folder) {
+      document.getElementById('launcherFolder').value = folder;
+      const nameInput = document.getElementById('launcherName');
+      if (!nameInput.value.trim()) {
+        // Auto-fill name from last folder segment
+        const segments = folder.replace(/\\/g, '/').split('/').filter(Boolean);
+        nameInput.value = segments[segments.length - 1] || 'Project';
+      }
+    }
   }
 
   async function saveLauncher() {
     const name = document.getElementById('launcherName').value.trim();
     const folder = document.getElementById('launcherFolder').value.trim();
-    const claudeArgs = document.getElementById('launcherArgs').value.trim() || '--dangerously-skip-permissions';
+    const claudeArgs = '--dangerously-skip-permissions';
 
     if (!name || !folder) { showToast('Name and folder are required'); return; }
 
@@ -1957,6 +2017,16 @@
     await bwRefreshPolicies();
     await procRefreshRules();
     await refreshLaunchers();
+    await updateSavedSpeedInfo();
+    // Show setup status if already configured
+    const claudeConfig = await window.api.getClaudeConfig();
+    if (claudeConfig) {
+      const setupStatus = document.getElementById('setupStatus');
+      if (setupStatus) {
+        setupStatus.textContent = `Configured: ${claudeConfig.limitMbps} Mbps limit (${claudeConfig.percent}% of ${claudeConfig.speed.upload} Mbps)`;
+        setupStatus.style.color = '#44cc44';
+      }
+    }
     await refreshPrompts();
 
     // Start stats monitoring
