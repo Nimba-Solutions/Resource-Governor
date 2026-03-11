@@ -1,13 +1,20 @@
 /**
  * @name         Resource Governor
  * @license      BSL 1.1 — See LICENSE.md
- * @description  Electron main process — unified bandwidth, CPU, and memory governor for Windows.
+ * @description  Electron main process — unified bandwidth, CPU, and memory governor.
+ *               Windows: QoS policies + ProcessorAffinity/MaxWorkingSet via PowerShell
+ *               macOS:   pfctl/dnctl + cpulimit/renice
+ *               Linux:   tc (traffic control) + taskset/prlimit
  * @author       Cloud Nimbus LLC
  */
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const { exec } = require('child_process');
 const Store = require('electron-store');
+
+const platform = process.platform; // 'win32', 'darwin', 'linux'
 
 const store = new Store({
   defaults: {
@@ -33,6 +40,7 @@ const store = new Store({
     launchers: [],
     prompts: [],
     claudeConfig: null, // { speed: {download, upload}, percent, limitMbps, testedAt }
+    pipeCounter: 100, // macOS: next available dnctl pipe number
   },
 });
 
@@ -162,13 +170,28 @@ function createTray() {
 }
 
 // ============================================================
-// POWERSHELL RUNNER
+// SHELL HELPERS
 // ============================================================
 
+/**
+ * Run a PowerShell command (Windows only).
+ */
 function runPowerShell(command) {
   return new Promise((resolve, reject) => {
     const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${command.replace(/"/g, '\\"')}"`;
     exec(psCmd, { windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(stderr || err.message));
+      else resolve(stdout.trim());
+    });
+  });
+}
+
+/**
+ * Run a shell command via bash (macOS/Linux).
+ */
+function runShell(command) {
+  return new Promise((resolve, reject) => {
+    exec(command, { shell: '/bin/bash', maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout.trim());
     });
@@ -181,54 +204,155 @@ function runPowerShell(command) {
 
 async function checkAdmin() {
   try {
-    const result = await runPowerShell(
-      `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`
-    );
-    return result === 'True';
+    if (platform === 'win32') {
+      const result = await runPowerShell(
+        `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`
+      );
+      return result === 'True';
+    } else if (platform === 'darwin') {
+      const result = await runShell('id -Gn');
+      return result.split(/\s+/).includes('admin');
+    } else {
+      // Linux: check if running as root
+      const result = await runShell('id -u');
+      return result.trim() === '0';
+    }
   } catch (e) {
     return false;
   }
 }
 
 // ============================================================
-// BANDWIDTH — Policy management via Windows QoS
+// LINUX HELPER — get default network interface
+// ============================================================
+
+async function getDefaultInterface() {
+  try {
+    const result = await runShell("ip route show default | awk '{print $5}' | head -n1");
+    return result || 'eth0';
+  } catch (e) {
+    return 'eth0';
+  }
+}
+
+// ============================================================
+// macOS HELPER — allocate a pipe number for dnctl
+// ============================================================
+
+function allocatePipeNumber() {
+  const num = store.get('pipeCounter', 100);
+  store.set('pipeCounter', num + 1);
+  return num;
+}
+
+// ============================================================
+// BANDWIDTH — Policy management (cross-platform)
 // ============================================================
 
 async function createPolicy({ name, appPath, uploadLimitMbps, downloadLimitMbps }) {
   const results = [];
 
-  if (uploadLimitMbps && uploadLimitMbps > 0) {
-    const bitsPerSec = Math.round(uploadLimitMbps * 1000000);
-    const policyName = `RG_UL_${name}`;
-    let cmd = `New-NetQosPolicy -Name '${policyName}' -ThrottleRateActionBitsPerSecond ${bitsPerSec}`;
-    if (appPath) cmd += ` -AppPathNameMatchCondition '${appPath}'`;
-    cmd += ' -PolicyStore ActiveStore';
-    try {
-      await runPowerShell(cmd);
-      results.push({ policy: policyName, status: 'created' });
-    } catch (e) {
-      results.push({ policy: policyName, status: 'error', message: e.message });
+  if (platform === 'win32') {
+    // Windows: QoS policies via PowerShell
+    if (uploadLimitMbps && uploadLimitMbps > 0) {
+      const bitsPerSec = Math.round(uploadLimitMbps * 1000000);
+      const policyName = `RG_UL_${name}`;
+      let cmd = `New-NetQosPolicy -Name '${policyName}' -ThrottleRateActionBitsPerSecond ${bitsPerSec}`;
+      if (appPath) cmd += ` -AppPathNameMatchCondition '${appPath}'`;
+      cmd += ' -PolicyStore ActiveStore';
+      try {
+        await runPowerShell(cmd);
+        results.push({ policy: policyName, status: 'created' });
+      } catch (e) {
+        results.push({ policy: policyName, status: 'error', message: e.message });
+      }
     }
-  }
 
-  if (downloadLimitMbps && downloadLimitMbps > 0) {
-    const bitsPerSec = Math.round(downloadLimitMbps * 1000000);
-    const policyName = `RG_DL_${name}`;
-    let cmd = `New-NetQosPolicy -Name '${policyName}' -ThrottleRateActionBitsPerSecond ${bitsPerSec}`;
-    if (appPath) cmd += ` -AppPathNameMatchCondition '${appPath}'`;
-    cmd += ' -PolicyStore ActiveStore';
+    if (downloadLimitMbps && downloadLimitMbps > 0) {
+      const bitsPerSec = Math.round(downloadLimitMbps * 1000000);
+      const policyName = `RG_DL_${name}`;
+      let cmd = `New-NetQosPolicy -Name '${policyName}' -ThrottleRateActionBitsPerSecond ${bitsPerSec}`;
+      if (appPath) cmd += ` -AppPathNameMatchCondition '${appPath}'`;
+      cmd += ' -PolicyStore ActiveStore';
+      try {
+        await runPowerShell(cmd);
+        results.push({ policy: policyName, status: 'created' });
+      } catch (e) {
+        results.push({ policy: policyName, status: 'error', message: e.message });
+      }
+    }
+  } else if (platform === 'darwin') {
+    // macOS: pfctl + dnctl (dummynet pipes)
+    // NOTE: Per-app bandwidth limiting is not supported on macOS via pfctl.
+    // pfctl operates on ports/IPs, not application paths. All limits are applied globally.
+    // The appPath parameter is stored but ignored for enforcement on macOS.
     try {
-      await runPowerShell(cmd);
-      results.push({ policy: policyName, status: 'created' });
+      if (uploadLimitMbps && uploadLimitMbps > 0) {
+        const pipeNum = allocatePipeNumber();
+        const rateKbit = Math.round(uploadLimitMbps * 1000);
+        await runShell(`sudo dnctl pipe ${pipeNum} config bw ${rateKbit}Kbit/s`);
+        await runShell(`echo "dummynet out proto tcp from any to any pipe ${pipeNum}" | sudo pfctl -a "rg/${name}_ul" -f -`);
+        await runShell('sudo pfctl -e 2>/dev/null || true');
+        results.push({ policy: `rg/${name}_ul`, pipe: pipeNum, status: 'created' });
+      }
+
+      if (downloadLimitMbps && downloadLimitMbps > 0) {
+        const pipeNum = allocatePipeNumber();
+        const rateKbit = Math.round(downloadLimitMbps * 1000);
+        await runShell(`sudo dnctl pipe ${pipeNum} config bw ${rateKbit}Kbit/s`);
+        await runShell(`echo "dummynet in proto tcp from any to any pipe ${pipeNum}" | sudo pfctl -a "rg/${name}_dl" -f -`);
+        await runShell('sudo pfctl -e 2>/dev/null || true');
+        results.push({ policy: `rg/${name}_dl`, pipe: pipeNum, status: 'created' });
+      }
     } catch (e) {
-      results.push({ policy: policyName, status: 'error', message: e.message });
+      results.push({ policy: name, status: 'error', message: e.message });
+    }
+  } else if (platform === 'linux') {
+    // Linux: tc (traffic control) with tbf qdisc for simple global limiting.
+    // NOTE: Per-app bandwidth limiting on Linux would require cgroups + net_cls,
+    // which is not implemented here. All limits are applied globally.
+    // The appPath parameter is stored but ignored for enforcement on Linux.
+    try {
+      const iface = await getDefaultInterface();
+
+      if (uploadLimitMbps && uploadLimitMbps > 0) {
+        const rateKbit = Math.round(uploadLimitMbps * 1000);
+        // Remove any existing root qdisc first (ignore errors if none exists)
+        await runShell(`sudo tc qdisc del dev ${iface} root 2>/dev/null || true`);
+        await runShell(`sudo tc qdisc add dev ${iface} root tbf rate ${rateKbit}kbit burst 32kbit latency 400ms`);
+        results.push({ policy: `tc_ul_${name}`, iface, status: 'created' });
+      }
+
+      if (downloadLimitMbps && downloadLimitMbps > 0) {
+        const rateKbit = Math.round(downloadLimitMbps * 1000);
+        // For download limiting on Linux, use an IFB (intermediate functional block) device
+        await runShell('sudo modprobe ifb 2>/dev/null || true');
+        await runShell('sudo ip link set dev ifb0 up 2>/dev/null || true');
+        await runShell(`sudo tc qdisc del dev ${iface} ingress 2>/dev/null || true`);
+        await runShell(`sudo tc qdisc add dev ${iface} ingress`);
+        await runShell(`sudo tc filter add dev ${iface} parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ifb0`);
+        await runShell(`sudo tc qdisc del dev ifb0 root 2>/dev/null || true`);
+        await runShell(`sudo tc qdisc add dev ifb0 root tbf rate ${rateKbit}kbit burst 32kbit latency 400ms`);
+        results.push({ policy: `tc_dl_${name}`, iface, status: 'created' });
+      }
+    } catch (e) {
+      results.push({ policy: name, status: 'error', message: e.message });
     }
   }
 
   // Save to persistent store (avoid duplicates)
   const saved = store.get('policies', []);
   const existing = saved.findIndex(p => p.name === name);
-  const entry = { name, appPath, uploadLimitMbps, downloadLimitMbps, createdAt: new Date().toISOString() };
+  const entry = {
+    name,
+    appPath,
+    uploadLimitMbps,
+    downloadLimitMbps,
+    createdAt: new Date().toISOString(),
+    platform,
+    ...(platform === 'darwin' ? { pipes: results.filter(r => r.pipe).map(r => r.pipe) } : {}),
+    ...(platform === 'linux' ? { iface: results.length > 0 ? results[0].iface : null } : {}),
+  };
   if (existing >= 0) saved[existing] = entry;
   else saved.push(entry);
   store.set('policies', saved);
@@ -238,25 +362,82 @@ async function createPolicy({ name, appPath, uploadLimitMbps, downloadLimitMbps 
 
 async function removePolicy(name) {
   const results = [];
-  for (const prefix of ['RG_UL_', 'RG_DL_']) {
-    const policyName = `${prefix}${name}`;
+  const saved = store.get('policies', []);
+  const policy = saved.find(p => p.name === name);
+
+  if (platform === 'win32') {
+    for (const prefix of ['RG_UL_', 'RG_DL_']) {
+      const policyName = `${prefix}${name}`;
+      try {
+        await runPowerShell(`Remove-NetQosPolicy -Name '${policyName}' -PolicyStore ActiveStore -Confirm:$false`);
+        results.push({ policy: policyName, status: 'removed' });
+      } catch (e) {
+        results.push({ policy: policyName, status: 'not_found' });
+      }
+    }
+  } else if (platform === 'darwin') {
+    // Remove pf anchor rules
+    for (const suffix of ['_ul', '_dl']) {
+      try {
+        await runShell(`sudo pfctl -a "rg/${name}${suffix}" -F all 2>/dev/null || true`);
+        results.push({ policy: `rg/${name}${suffix}`, status: 'removed' });
+      } catch (e) {
+        results.push({ policy: `rg/${name}${suffix}`, status: 'not_found' });
+      }
+    }
+    // Delete associated dnctl pipes
+    if (policy && policy.pipes) {
+      for (const pipeNum of policy.pipes) {
+        try {
+          await runShell(`sudo dnctl pipe ${pipeNum} delete 2>/dev/null || true`);
+        } catch (e) { /* ignore */ }
+      }
+    }
+  } else if (platform === 'linux') {
+    // Remove tc qdiscs — this removes all tc rules on the interface
     try {
-      await runPowerShell(`Remove-NetQosPolicy -Name '${policyName}' -PolicyStore ActiveStore -Confirm:$false`);
-      results.push({ policy: policyName, status: 'removed' });
+      const iface = (policy && policy.iface) || await getDefaultInterface();
+      await runShell(`sudo tc qdisc del dev ${iface} root 2>/dev/null || true`);
+      await runShell(`sudo tc qdisc del dev ${iface} ingress 2>/dev/null || true`);
+      await runShell(`sudo tc qdisc del dev ifb0 root 2>/dev/null || true`);
+      results.push({ policy: `tc_${name}`, status: 'removed' });
     } catch (e) {
-      results.push({ policy: policyName, status: 'not_found' });
+      results.push({ policy: `tc_${name}`, status: 'not_found' });
     }
   }
-  const saved = store.get('policies', []);
+
   store.set('policies', saved.filter(p => p.name !== name));
   return results;
 }
 
 async function removeAllPolicies() {
   try {
-    await runPowerShell(
-      `Get-NetQosPolicy -PolicyStore ActiveStore | Where-Object { $_.Name -like 'RG_*' } | Remove-NetQosPolicy -Confirm:$false`
-    );
+    if (platform === 'win32') {
+      await runPowerShell(
+        `Get-NetQosPolicy -PolicyStore ActiveStore | Where-Object { $_.Name -like 'RG_*' } | Remove-NetQosPolicy -Confirm:$false`
+      );
+    } else if (platform === 'darwin') {
+      // Flush all rules under the "rg" anchor and delete all associated pipes
+      await runShell('sudo pfctl -a "rg" -F all 2>/dev/null || true');
+      const saved = store.get('policies', []);
+      for (const policy of saved) {
+        if (policy.pipes) {
+          for (const pipeNum of policy.pipes) {
+            try {
+              await runShell(`sudo dnctl pipe ${pipeNum} delete 2>/dev/null || true`);
+            } catch (e) { /* ignore */ }
+          }
+        }
+      }
+      // Reset pipe counter
+      store.set('pipeCounter', 100);
+    } else if (platform === 'linux') {
+      const iface = await getDefaultInterface();
+      await runShell(`sudo tc qdisc del dev ${iface} root 2>/dev/null || true`);
+      await runShell(`sudo tc qdisc del dev ${iface} ingress 2>/dev/null || true`);
+      await runShell(`sudo tc qdisc del dev ifb0 root 2>/dev/null || true`);
+    }
+
     store.set('policies', []);
     return { status: 'all_removed' };
   } catch (e) {
@@ -274,9 +455,26 @@ async function toggleBandwidthEnabled() {
     await reapplyPolicies();
   } else {
     try {
-      await runPowerShell(
-        `Get-NetQosPolicy -PolicyStore ActiveStore | Where-Object { $_.Name -like 'RG_*' } | Remove-NetQosPolicy -Confirm:$false`
-      );
+      if (platform === 'win32') {
+        await runPowerShell(
+          `Get-NetQosPolicy -PolicyStore ActiveStore | Where-Object { $_.Name -like 'RG_*' } | Remove-NetQosPolicy -Confirm:$false`
+        );
+      } else if (platform === 'darwin') {
+        await runShell('sudo pfctl -a "rg" -F all 2>/dev/null || true');
+        const saved = store.get('policies', []);
+        for (const policy of saved) {
+          if (policy.pipes) {
+            for (const pipeNum of policy.pipes) {
+              try { await runShell(`sudo dnctl pipe ${pipeNum} delete 2>/dev/null || true`); } catch (e) { /* ignore */ }
+            }
+          }
+        }
+      } else if (platform === 'linux') {
+        const iface = await getDefaultInterface();
+        await runShell(`sudo tc qdisc del dev ${iface} root 2>/dev/null || true`);
+        await runShell(`sudo tc qdisc del dev ${iface} ingress 2>/dev/null || true`);
+        await runShell(`sudo tc qdisc del dev ifb0 root 2>/dev/null || true`);
+      }
     } catch (e) { /* ignore */ }
   }
 
@@ -304,22 +502,48 @@ async function reapplyPolicies() {
     return;
   }
 
-  for (const p of saved) {
-    if (p.uploadLimitMbps && p.uploadLimitMbps > 0) {
-      const bitsPerSec = Math.round(p.uploadLimitMbps * 1000000);
-      const policyName = `RG_UL_${p.name}`;
-      let cmd = `New-NetQosPolicy -Name '${policyName}' -ThrottleRateActionBitsPerSecond ${bitsPerSec}`;
-      if (p.appPath) cmd += ` -AppPathNameMatchCondition '${p.appPath}'`;
-      cmd += ' -PolicyStore ActiveStore';
-      try { await runPowerShell(cmd); } catch (e) { /* ignore duplicates */ }
+  if (platform === 'win32') {
+    // Windows: create QoS policies for each saved entry
+    for (const p of saved) {
+      if (p.uploadLimitMbps && p.uploadLimitMbps > 0) {
+        const bitsPerSec = Math.round(p.uploadLimitMbps * 1000000);
+        const policyName = `RG_UL_${p.name}`;
+        let cmd = `New-NetQosPolicy -Name '${policyName}' -ThrottleRateActionBitsPerSecond ${bitsPerSec}`;
+        if (p.appPath) cmd += ` -AppPathNameMatchCondition '${p.appPath}'`;
+        cmd += ' -PolicyStore ActiveStore';
+        try { await runPowerShell(cmd); } catch (e) { /* ignore duplicates */ }
+      }
+      if (p.downloadLimitMbps && p.downloadLimitMbps > 0) {
+        const bitsPerSec = Math.round(p.downloadLimitMbps * 1000000);
+        const policyName = `RG_DL_${p.name}`;
+        let cmd = `New-NetQosPolicy -Name '${policyName}' -ThrottleRateActionBitsPerSecond ${bitsPerSec}`;
+        if (p.appPath) cmd += ` -AppPathNameMatchCondition '${p.appPath}'`;
+        cmd += ' -PolicyStore ActiveStore';
+        try { await runPowerShell(cmd); } catch (e) { /* ignore duplicates */ }
+      }
     }
-    if (p.downloadLimitMbps && p.downloadLimitMbps > 0) {
-      const bitsPerSec = Math.round(p.downloadLimitMbps * 1000000);
-      const policyName = `RG_DL_${p.name}`;
-      let cmd = `New-NetQosPolicy -Name '${policyName}' -ThrottleRateActionBitsPerSecond ${bitsPerSec}`;
-      if (p.appPath) cmd += ` -AppPathNameMatchCondition '${p.appPath}'`;
-      cmd += ' -PolicyStore ActiveStore';
-      try { await runPowerShell(cmd); } catch (e) { /* ignore duplicates */ }
+  } else {
+    // macOS/Linux: re-create policies via the normal createPolicy flow.
+    // We clear first, then re-apply each saved policy.
+    const savedCopy = JSON.parse(JSON.stringify(saved));
+
+    if (platform === 'darwin') {
+      await runShell('sudo pfctl -a "rg" -F all 2>/dev/null || true');
+      store.set('pipeCounter', 100);
+    } else if (platform === 'linux') {
+      const iface = await getDefaultInterface();
+      await runShell(`sudo tc qdisc del dev ${iface} root 2>/dev/null || true`);
+      await runShell(`sudo tc qdisc del dev ${iface} ingress 2>/dev/null || true`);
+      await runShell(`sudo tc qdisc del dev ifb0 root 2>/dev/null || true`);
+    }
+
+    for (const p of savedCopy) {
+      await createPolicy({
+        name: p.name,
+        appPath: p.appPath,
+        uploadLimitMbps: p.uploadLimitMbps,
+        downloadLimitMbps: p.downloadLimitMbps,
+      });
     }
   }
 }
@@ -331,35 +555,119 @@ let lastStatsTime = null;
 
 async function getBandwidthUsage() {
   try {
-    const raw = await runPowerShell(
-      `Get-NetAdapterStatistics | Select-Object Name, SentBytes, ReceivedBytes | ConvertTo-Json -Compress`
-    );
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    const stats = Array.isArray(parsed) ? parsed : [parsed];
-    const now = Date.now();
+    if (platform === 'win32') {
+      // Windows: Get-NetAdapterStatistics via PowerShell
+      const raw = await runPowerShell(
+        `Get-NetAdapterStatistics | Select-Object Name, SentBytes, ReceivedBytes | ConvertTo-Json -Compress`
+      );
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const stats = Array.isArray(parsed) ? parsed : [parsed];
+      const now = Date.now();
 
-    if (lastStats && lastStatsTime) {
-      const elapsed = (now - lastStatsTime) / 1000;
-      const results = stats.map((s) => {
-        const prev = lastStats.find(p => p.Name === s.Name);
-        if (!prev) return { name: s.Name, uploadMbps: 0, downloadMbps: 0 };
-        const uploadBytes = s.SentBytes - prev.SentBytes;
-        const downloadBytes = s.ReceivedBytes - prev.ReceivedBytes;
-        return {
-          name: s.Name,
-          uploadMbps: Math.max(0, (uploadBytes * 8 / 1000000) / elapsed).toFixed(2),
-          downloadMbps: Math.max(0, (downloadBytes * 8 / 1000000) / elapsed).toFixed(2),
-        };
-      });
+      if (lastStats && lastStatsTime) {
+        const elapsed = (now - lastStatsTime) / 1000;
+        const results = stats.map((s) => {
+          const prev = lastStats.find(p => p.Name === s.Name);
+          if (!prev) return { name: s.Name, uploadMbps: 0, downloadMbps: 0 };
+          const uploadBytes = s.SentBytes - prev.SentBytes;
+          const downloadBytes = s.ReceivedBytes - prev.ReceivedBytes;
+          return {
+            name: s.Name,
+            uploadMbps: Math.max(0, (uploadBytes * 8 / 1000000) / elapsed).toFixed(2),
+            downloadMbps: Math.max(0, (downloadBytes * 8 / 1000000) / elapsed).toFixed(2),
+          };
+        });
+        lastStats = stats;
+        lastStatsTime = now;
+        return results;
+      }
+
       lastStats = stats;
       lastStatsTime = now;
-      return results;
-    }
+      return stats.map(s => ({ name: s.Name, uploadMbps: '0.00', downloadMbps: '0.00' }));
 
-    lastStats = stats;
-    lastStatsTime = now;
-    return stats.map(s => ({ name: s.Name, uploadMbps: '0.00', downloadMbps: '0.00' }));
+    } else if (platform === 'darwin') {
+      // macOS: parse netstat -ib for interface byte counts
+      const raw = await runShell('/usr/sbin/netstat -ib');
+      const lines = raw.split('\n');
+      // Header: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+      const stats = [];
+      for (const line of lines.slice(1)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 11) continue;
+        // Only include entries with a Link#N address (physical interfaces)
+        if (!parts[3] || !parts[3].startsWith('Link#')) continue;
+        const name = parts[0];
+        const receivedBytes = parseInt(parts[6], 10) || 0;
+        const sentBytes = parseInt(parts[9], 10) || 0;
+        stats.push({ Name: name, SentBytes: sentBytes, ReceivedBytes: receivedBytes });
+      }
+      if (stats.length === 0) return null;
+
+      const now = Date.now();
+      if (lastStats && lastStatsTime) {
+        const elapsed = (now - lastStatsTime) / 1000;
+        const results = stats.map((s) => {
+          const prev = lastStats.find(p => p.Name === s.Name);
+          if (!prev) return { name: s.Name, uploadMbps: 0, downloadMbps: 0 };
+          const uploadBytes = s.SentBytes - prev.SentBytes;
+          const downloadBytes = s.ReceivedBytes - prev.ReceivedBytes;
+          return {
+            name: s.Name,
+            uploadMbps: Math.max(0, (uploadBytes * 8 / 1000000) / elapsed).toFixed(2),
+            downloadMbps: Math.max(0, (downloadBytes * 8 / 1000000) / elapsed).toFixed(2),
+          };
+        });
+        lastStats = stats;
+        lastStatsTime = now;
+        return results;
+      }
+
+      lastStats = stats;
+      lastStatsTime = now;
+      return stats.map(s => ({ name: s.Name, uploadMbps: '0.00', downloadMbps: '0.00' }));
+
+    } else if (platform === 'linux') {
+      // Linux: read /proc/net/dev for interface byte counts
+      const raw = fs.readFileSync('/proc/net/dev', 'utf8');
+      const lines = raw.split('\n');
+      // Skip header lines (first 2 lines)
+      const stats = [];
+      for (const line of lines.slice(2)) {
+        const match = line.trim().match(/^(\S+):\s+(\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+(\d+)/);
+        if (!match) continue;
+        const name = match[1];
+        if (name === 'lo') continue; // skip loopback
+        const receivedBytes = parseInt(match[2], 10);
+        const sentBytes = parseInt(match[3], 10);
+        stats.push({ Name: name, SentBytes: sentBytes, ReceivedBytes: receivedBytes });
+      }
+      if (stats.length === 0) return null;
+
+      const now = Date.now();
+      if (lastStats && lastStatsTime) {
+        const elapsed = (now - lastStatsTime) / 1000;
+        const results = stats.map((s) => {
+          const prev = lastStats.find(p => p.Name === s.Name);
+          if (!prev) return { name: s.Name, uploadMbps: 0, downloadMbps: 0 };
+          const uploadBytes = s.SentBytes - prev.SentBytes;
+          const downloadBytes = s.ReceivedBytes - prev.ReceivedBytes;
+          return {
+            name: s.Name,
+            uploadMbps: Math.max(0, (uploadBytes * 8 / 1000000) / elapsed).toFixed(2),
+            downloadMbps: Math.max(0, (downloadBytes * 8 / 1000000) / elapsed).toFixed(2),
+          };
+        });
+        lastStats = stats;
+        lastStatsTime = now;
+        return results;
+      }
+
+      lastStats = stats;
+      lastStatsTime = now;
+      return stats.map(s => ({ name: s.Name, uploadMbps: '0.00', downloadMbps: '0.00' }));
+    }
   } catch (e) {
     return null;
   }
@@ -369,13 +677,15 @@ async function getBandwidthUsage() {
 
 async function runSpeedTest() {
   const results = { download: 0, upload: 0 };
+  const nullDev = platform === 'win32' ? 'NUL' : '/dev/null';
+  const hideOpts = platform === 'win32' ? { windowsHide: true, timeout: 30000 } : { timeout: 30000 };
 
   try {
     const dlResult = await new Promise((resolve, reject) => {
       const testSize = 10000000;
       exec(
-        `curl -s -o NUL -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=${testSize}"`,
-        { windowsHide: true, timeout: 30000 },
+        `curl -s -o ${nullDev} -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=${testSize}"`,
+        hideOpts,
         (err, stdout) => {
           if (err) return reject(err);
           const bytesPerSec = parseFloat(stdout.replace(/"/g, ''));
@@ -391,12 +701,11 @@ async function runSpeedTest() {
   try {
     const ulResult = await new Promise((resolve, reject) => {
       const tempFile = path.join(app.getPath('temp'), 'rg-speedtest.bin');
-      const fs = require('fs');
       fs.writeFileSync(tempFile, Buffer.alloc(2000000, 0x41));
 
       exec(
-        `curl -s -w "%{speed_upload}" -X POST -F "file=@${tempFile.replace(/\\/g, '/')}" "https://speed.cloudflare.com/__up" -o NUL`,
-        { windowsHide: true, timeout: 30000 },
+        `curl -s -w "%{speed_upload}" -X POST -F "file=@${tempFile.replace(/\\/g, '/')}" "https://speed.cloudflare.com/__up" -o ${nullDev}`,
+        hideOpts,
         (err, stdout) => {
           try { fs.unlinkSync(tempFile); } catch (e) {}
           if (err) return reject(err);
@@ -425,10 +734,18 @@ const BANDWIDTH_PRESETS = {
 };
 
 // ============================================================
-// PROCESS — CPU/Memory limiting via affinity & working set
+// PROCESS — CPU/Memory limiting (cross-platform)
 // ============================================================
 
 async function getTopProcesses() {
+  if (platform === 'win32') {
+    return getTopProcessesWindows();
+  }
+  // macOS and Linux both use `ps aux`
+  return getTopProcessesUnix();
+}
+
+async function getTopProcessesWindows() {
   const cmd = `Get-Process | Where-Object { $_.CPU -gt 0 } | Sort-Object CPU -Descending | Select-Object -First 50 Id, ProcessName, CPU, @{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB,1)}}, Path | ConvertTo-Json -Compress`;
   try {
     const raw = await runPowerShell(cmd);
@@ -446,7 +763,50 @@ async function getTopProcesses() {
   }
 }
 
+async function getTopProcessesUnix() {
+  // ps aux columns: USER PID %CPU %MEM VSZ RSS TT STAT STARTED TIME COMMAND
+  // Sort by CPU descending, take top 50
+  try {
+    const raw = await runShell('ps aux --sort=-%cpu 2>/dev/null || ps aux -r');
+    if (!raw) return [];
+    const lines = raw.split('\n');
+    // Skip header line
+    const processes = [];
+    for (let i = 1; i < lines.length && processes.length < 50; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      // Split on whitespace, but COMMAND can contain spaces so limit the split
+      const parts = line.split(/\s+/);
+      if (parts.length < 11) continue;
+      const pid = parseInt(parts[1], 10);
+      const cpuPercent = parseFloat(parts[2]) || 0;
+      const rssMb = Math.round((parseInt(parts[5], 10) || 0) / 1024 * 10) / 10; // RSS is in KB
+      const command = parts.slice(10).join(' ');
+      // Extract the process name from the command path
+      const name = path.basename(command.split(' ')[0]);
+      if (cpuPercent <= 0) continue;
+      processes.push({
+        pid,
+        name,
+        cpuTime: cpuPercent, // on Unix we report current CPU% rather than cumulative time
+        memoryMb: rssMb,
+        path: command.split(' ')[0],
+      });
+    }
+    return processes;
+  } catch (e) {
+    return [];
+  }
+}
+
 async function getSystemStats() {
+  if (platform === 'win32') {
+    return getSystemStatsWindows();
+  }
+  return getSystemStatsUnix();
+}
+
+async function getSystemStatsWindows() {
   const cmd = `$cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; $mem = Get-CimInstance Win32_OperatingSystem; @{CPU=[math]::Round($cpu,1);TotalMemGB=[math]::Round($mem.TotalVisibleMemorySize/1MB,1);FreeMemGB=[math]::Round($mem.FreePhysicalMemory/1MB,1);Cores=(Get-CimInstance Win32_Processor).NumberOfLogicalProcessors} | ConvertTo-Json -Compress`;
   try {
     const raw = await runPowerShell(cmd);
@@ -456,8 +816,42 @@ async function getSystemStats() {
   }
 }
 
+async function getSystemStatsUnix() {
+  // Use Node.js os module for cross-platform system info
+  const cores = os.cpus().length;
+  const totalMemGB = Math.round(os.totalmem() / (1024 * 1024 * 1024) * 10) / 10;
+  const freeMemGB = Math.round(os.freemem() / (1024 * 1024 * 1024) * 10) / 10;
+
+  // Get CPU load percentage from os.loadavg (1-minute average, normalized to core count)
+  const loadAvg1m = os.loadavg()[0];
+  const cpuPercent = Math.round((loadAvg1m / cores) * 100 * 10) / 10;
+
+  return {
+    CPU: Math.min(cpuPercent, 100),
+    TotalMemGB: totalMemGB,
+    FreeMemGB: freeMemGB,
+    Cores: cores,
+  };
+}
+
+// --- CPU Limiting ---
+// Windows: ProcessorAffinity + PriorityClass via PowerShell
+// Linux:   taskset for CPU affinity (direct equivalent of ProcessorAffinity)
+// macOS:   cpulimit (brew) for percentage-based throttling, renice as fallback
+
 async function applyCpuLimit(processName, cpuPercent) {
-  const cores = require('os').cpus().length;
+  if (platform === 'win32') {
+    return applyCpuLimitWindows(processName, cpuPercent);
+  }
+  if (platform === 'linux') {
+    return applyCpuLimitLinux(processName, cpuPercent);
+  }
+  // darwin
+  return applyCpuLimitMac(processName, cpuPercent);
+}
+
+async function applyCpuLimitWindows(processName, cpuPercent) {
+  const cores = os.cpus().length;
   const allowedCores = Math.max(1, Math.round(cores * (cpuPercent / 100)));
 
   let mask = 0;
@@ -474,7 +868,121 @@ async function applyCpuLimit(processName, cpuPercent) {
   }
 }
 
+async function applyCpuLimitLinux(processName, cpuPercent) {
+  const cores = os.cpus().length;
+  const allowedCores = Math.max(1, Math.round(cores * (cpuPercent / 100)));
+
+  // Build affinity mask (enable first N cores) — same concept as Windows ProcessorAffinity
+  let mask = 0;
+  for (let i = 0; i < allowedCores; i++) {
+    mask |= (1 << i);
+  }
+  const hexMask = '0x' + mask.toString(16);
+
+  try {
+    // Find all PIDs matching the process name
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    if (pids.length === 0) {
+      return { status: 'ok', allowedCores, totalCores: cores, mask, note: 'No matching processes found' };
+    }
+
+    const errors = [];
+    for (const pid of pids) {
+      try {
+        // taskset is the direct Linux equivalent of Windows ProcessorAffinity
+        await runShell(`taskset -p ${hexMask} ${pid.trim()}`);
+        // Also lower the priority (renice)
+        await runShell(`renice +10 -p ${pid.trim()} 2>/dev/null || true`);
+      } catch (e) {
+        errors.push(`PID ${pid}: ${e.message}`);
+      }
+    }
+
+    if (errors.length > 0 && errors.length === pids.length) {
+      return { status: 'error', message: errors.join('; ') };
+    }
+    return { status: 'ok', allowedCores, totalCores: cores, mask };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+async function applyCpuLimitMac(processName, cpuPercent) {
+  // macOS does NOT support CPU affinity (the OS does not expose per-process core pinning).
+  // Strategy:
+  //   1. Try cpulimit (brew install cpulimit) for percentage-based throttling
+  //   2. Fall back to renice for soft priority-based limiting
+  const cores = os.cpus().length;
+
+  try {
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    if (pids.length === 0) {
+      return { status: 'ok', totalCores: cores, note: 'No matching processes found' };
+    }
+
+    // Check if cpulimit is available
+    let hasCpulimit = false;
+    try {
+      await runShell('which cpulimit');
+      hasCpulimit = true;
+    } catch (_) { /* not installed */ }
+
+    const results = [];
+    for (const pid of pids) {
+      const trimmedPid = pid.trim();
+      if (hasCpulimit) {
+        try {
+          // Kill any existing cpulimit for this PID first
+          await runShell(`pkill -f 'cpulimit.*-p ${trimmedPid}' 2>/dev/null || true`);
+          // Launch cpulimit in background — it will throttle the process continuously
+          const perProcessLimit = Math.max(1, Math.round(cpuPercent));
+          await runShell(`cpulimit -p ${trimmedPid} -l ${perProcessLimit} -b 2>/dev/null`);
+          results.push({ pid: trimmedPid, method: 'cpulimit' });
+        } catch (e) {
+          // Fall back to renice
+          await runShell(`renice +10 -p ${trimmedPid} 2>/dev/null || true`);
+          results.push({ pid: trimmedPid, method: 'renice', note: 'cpulimit failed, used renice' });
+        }
+      } else {
+        // No cpulimit available, use renice as a soft alternative
+        await runShell(`renice +10 -p ${trimmedPid} 2>/dev/null || true`);
+        results.push({ pid: trimmedPid, method: 'renice' });
+      }
+    }
+
+    return {
+      status: 'ok',
+      totalCores: cores,
+      method: hasCpulimit ? 'cpulimit' : 'renice',
+      note: hasCpulimit
+        ? undefined
+        : 'CPU affinity not supported on macOS. Using renice for priority-based limiting. Install cpulimit (brew install cpulimit) for percentage-based throttling.',
+      results,
+    };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+// --- Memory Limiting ---
+// Windows: MaxWorkingSet via PowerShell
+// Linux:   prlimit --as=<bytes> for existing processes
+// macOS:   Very limited — no reliable way to limit memory of running processes
+
 async function applyMemoryLimit(processName, memoryMb) {
+  if (platform === 'win32') {
+    return applyMemoryLimitWindows(processName, memoryMb);
+  }
+  if (platform === 'linux') {
+    return applyMemoryLimitLinux(processName, memoryMb);
+  }
+  // darwin
+  return applyMemoryLimitMac(processName, memoryMb);
+}
+
+async function applyMemoryLimitWindows(processName, memoryMb) {
   const bytes = memoryMb * 1024 * 1024;
   const cmd = `Get-Process -Name '${processName}' -ErrorAction SilentlyContinue | ForEach-Object { $_.MaxWorkingSet = ${bytes} }`;
   try {
@@ -485,14 +993,109 @@ async function applyMemoryLimit(processName, memoryMb) {
   }
 }
 
+async function applyMemoryLimitLinux(processName, memoryMb) {
+  // Use prlimit to set address space limit on existing processes.
+  const bytes = memoryMb * 1024 * 1024;
+
+  try {
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    if (pids.length === 0) {
+      return { status: 'ok', note: 'No matching processes found' };
+    }
+
+    const errors = [];
+    for (const pid of pids) {
+      try {
+        await runShell(`prlimit --pid ${pid.trim()} --as=${bytes}`);
+      } catch (e) {
+        errors.push(`PID ${pid}: ${e.message}`);
+      }
+    }
+
+    if (errors.length > 0 && errors.length === pids.length) {
+      return { status: 'error', message: errors.join('; ') };
+    }
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+async function applyMemoryLimitMac(processName, memoryMb) {
+  // macOS limitation: there is no reliable way to limit memory of an already-running process.
+  return {
+    status: 'unsupported',
+    message: 'Memory limiting for existing processes is not supported on macOS. '
+      + 'The OS does not provide an API to cap memory of running processes. '
+      + 'ulimit -v only applies to newly spawned child processes.',
+    note: 'macOS does not support memory limits on running processes.',
+  };
+}
+
+// --- Reset / remove limits ---
+
 async function resetProcessLimits(processName) {
-  const cores = require('os').cpus().length;
+  if (platform === 'win32') {
+    return resetProcessLimitsWindows(processName);
+  }
+  if (platform === 'linux') {
+    return resetProcessLimitsLinux(processName);
+  }
+  return resetProcessLimitsMac(processName);
+}
+
+async function resetProcessLimitsWindows(processName) {
+  const cores = os.cpus().length;
   let fullMask = 0;
   for (let i = 0; i < cores; i++) fullMask |= (1 << i);
 
   const cmd = `Get-Process -Name '${processName}' -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessorAffinity = ${fullMask}; $_.PriorityClass = 'Normal' }`;
   try {
     await runPowerShell(cmd);
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+async function resetProcessLimitsLinux(processName) {
+  const cores = os.cpus().length;
+  let fullMask = 0;
+  for (let i = 0; i < cores; i++) fullMask |= (1 << i);
+  const hexMask = '0x' + fullMask.toString(16);
+
+  try {
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    for (const pid of pids) {
+      const trimmedPid = pid.trim();
+      // Restore full CPU affinity
+      await runShell(`taskset -p ${hexMask} ${trimmedPid} 2>/dev/null || true`);
+      // Restore normal priority
+      await runShell(`renice 0 -p ${trimmedPid} 2>/dev/null || true`);
+      // Remove prlimit memory restriction (set to unlimited)
+      await runShell(`prlimit --pid ${trimmedPid} --as=unlimited 2>/dev/null || true`);
+    }
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+async function resetProcessLimitsMac(processName) {
+  try {
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    for (const pid of pids) {
+      const trimmedPid = pid.trim();
+      // Kill any cpulimit processes targeting this PID
+      await runShell(`pkill -f 'cpulimit.*-p ${trimmedPid}' 2>/dev/null || true`);
+      // Restore normal priority
+      await runShell(`renice 0 -p ${trimmedPid} 2>/dev/null || true`);
+    }
+    // Also kill any cpulimit targeting by name (belt and suspenders)
+    await runShell(`pkill -f 'cpulimit.*${processName}' 2>/dev/null || true`);
     return { status: 'ok' };
   } catch (e) {
     return { status: 'error', message: e.message };
@@ -582,7 +1185,7 @@ const PROCESS_PRESETS = {
 };
 
 // ============================================================
-// AUTO-START (Windows registry)
+// AUTO-START (cross-platform)
 // ============================================================
 
 async function setAutoStart(enabled) {
@@ -591,15 +1194,67 @@ async function setAutoStart(enabled) {
   const launchCmd = exePath.includes('electron') ? `"${exePath}" "${appPath}"` : `"${exePath}"`;
 
   try {
-    if (enabled) {
-      await runPowerShell(
-        `New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'ResourceGovernor' -Value '${launchCmd}' -PropertyType String -Force`
-      );
-    } else {
-      await runPowerShell(
-        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'ResourceGovernor' -ErrorAction SilentlyContinue`
-      );
+    if (platform === 'win32') {
+      // Windows: registry-based auto-start
+      if (enabled) {
+        await runPowerShell(
+          `New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'ResourceGovernor' -Value '${launchCmd}' -PropertyType String -Force`
+        );
+      } else {
+        await runPowerShell(
+          `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'ResourceGovernor' -ErrorAction SilentlyContinue`
+        );
+      }
+    } else if (platform === 'darwin') {
+      // macOS: LaunchAgent plist
+      const plistName = 'com.cloudnimbus.resource-governor';
+      const plistDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
+      const plistPath = path.join(plistDir, `${plistName}.plist`);
+      if (enabled) {
+        const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${plistName}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${exePath}</string>${exePath.includes('electron') ? `\n        <string>${appPath}</string>` : ''}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>`;
+        if (!fs.existsSync(plistDir)) {
+          fs.mkdirSync(plistDir, { recursive: true });
+        }
+        fs.writeFileSync(plistPath, plistContent, 'utf8');
+      } else {
+        try { fs.unlinkSync(plistPath); } catch (e) { /* ignore if not found */ }
+      }
+    } else if (platform === 'linux') {
+      // Linux: .desktop file in autostart directory
+      const autostartDir = path.join(os.homedir(), '.config', 'autostart');
+      const desktopPath = path.join(autostartDir, 'resource-governor.desktop');
+      if (enabled) {
+        const desktopContent = `[Desktop Entry]
+Type=Application
+Name=Resource Governor
+Exec=${launchCmd}
+X-GNOME-Autostart-enabled=true
+Hidden=false
+NoDisplay=false
+Comment=Bandwidth, CPU, and memory governor
+`;
+        if (!fs.existsSync(autostartDir)) {
+          fs.mkdirSync(autostartDir, { recursive: true });
+        }
+        fs.writeFileSync(desktopPath, desktopContent, 'utf8');
+      } else {
+        try { fs.unlinkSync(desktopPath); } catch (e) { /* ignore if not found */ }
+      }
     }
+
     const settings = store.get('settings');
     settings.autoStart = enabled;
     store.set('settings', settings);
@@ -641,7 +1296,7 @@ ipcMain.handle('bw-apply-preset', async (_, { preset }) => {
 
 ipcMain.handle('bw-quick-limit-app', async (_, { appName, uploadMbps }) => {
   return await createPolicy({
-    name: `App_${appName.replace('.exe', '')}`,
+    name: `App_${appName.replace(/\.exe$/i, '')}`,
     appPath: appName,
     uploadLimitMbps: uploadMbps,
     downloadLimitMbps: 0,
@@ -669,40 +1324,68 @@ ipcMain.handle('bw-configure-claude', async (_, { uploadCapPercent, forceSpeedTe
   const percent = uploadCapPercent || 50;
   const limitMbps = Math.max(0.5, Math.round(speed.upload * (percent / 100) * 10) / 10);
 
-  // Step 3: Remove existing Claude policies
-  const claudeApps = ['node.exe', 'claude.exe', 'git.exe', 'git-remote-https.exe', 'ssh.exe', 'scp.exe'];
-  for (const a of claudeApps) {
-    try { await removePolicy(`Claude_${a.replace('.exe', '')}`); } catch (e) {}
-  }
+  // Step 3 & 4: Remove existing and apply new Claude policies
+  if (platform === 'win32') {
+    // Windows: per-app limiting targets specific executables
+    const claudeApps = ['node.exe', 'claude.exe', 'git.exe', 'git-remote-https.exe', 'ssh.exe', 'scp.exe'];
+    for (const a of claudeApps) {
+      try { await removePolicy(`Claude_${a.replace('.exe', '')}`); } catch (e) {}
+    }
 
-  // Step 4: Apply per-app limits to all Claude-related processes
-  const results = [];
-  for (const appName of claudeApps) {
+    const results = [];
+    for (const appName of claudeApps) {
+      const r = await createPolicy({
+        name: `Claude_${appName.replace('.exe', '')}`,
+        appPath: appName,
+        uploadLimitMbps: limitMbps,
+        downloadLimitMbps: 0,
+      });
+      results.push({ app: appName, result: r });
+    }
+
+    isBandwidthEnabled = true;
+    store.set('bandwidthEnabled', true);
+    updateTrayMenu();
+
+    const claudeConfig = { speed, percent, limitMbps, testedAt: new Date().toISOString() };
+    store.set('claudeConfig', claudeConfig);
+
+    return {
+      status: 'ok',
+      speed,
+      percent,
+      limitMbps,
+      results,
+      usedSavedSpeed: !forceSpeedTest && savedConfig && savedConfig.speed && savedConfig.speed.upload > 0,
+    };
+  } else {
+    // macOS/Linux: apply a single global upload limit (per-app not supported)
+    try { await removePolicy('Claude_global'); } catch (e) {}
+
     const r = await createPolicy({
-      name: `Claude_${appName.replace('.exe', '')}`,
-      appPath: appName,
+      name: 'Claude_global',
+      appPath: null,
       uploadLimitMbps: limitMbps,
       downloadLimitMbps: 0,
     });
-    results.push({ app: appName, result: r });
+
+    isBandwidthEnabled = true;
+    store.set('bandwidthEnabled', true);
+    updateTrayMenu();
+
+    const claudeConfig = { speed, percent, limitMbps, testedAt: new Date().toISOString() };
+    store.set('claudeConfig', claudeConfig);
+
+    return {
+      status: 'ok',
+      speed,
+      percent,
+      limitMbps,
+      results: [{ app: 'global', result: r }],
+      usedSavedSpeed: !forceSpeedTest && savedConfig && savedConfig.speed && savedConfig.speed.upload > 0,
+      note: 'Per-app limiting is only available on Windows. A global upload limit has been applied.',
+    };
   }
-
-  isBandwidthEnabled = true;
-  store.set('bandwidthEnabled', true);
-  updateTrayMenu();
-
-  // Save config for next time
-  const claudeConfig = { speed, percent, limitMbps, testedAt: new Date().toISOString() };
-  store.set('claudeConfig', claudeConfig);
-
-  return {
-    status: 'ok',
-    speed,
-    percent,
-    limitMbps,
-    results,
-    usedSavedSpeed: !forceSpeedTest && savedConfig && savedConfig.speed && savedConfig.speed.upload > 0,
-  };
 });
 
 ipcMain.handle('get-claude-config', () => store.get('claudeConfig'));
@@ -722,14 +1405,25 @@ ipcMain.handle('quick-setup', async (_, { uploadCapPercent }) => {
   const percent = uploadCapPercent || 50;
   const limitMbps = Math.max(0.5, Math.round(speed.upload * (percent / 100) * 10) / 10);
 
-  const claudeApps = ['node.exe', 'claude.exe', 'git.exe', 'git-remote-https.exe', 'ssh.exe', 'scp.exe'];
-  for (const a of claudeApps) {
-    try { await removePolicy(`Claude_${a.replace('.exe', '')}`); } catch (e) {}
-  }
-  for (const appName of claudeApps) {
+  if (platform === 'win32') {
+    const claudeApps = ['node.exe', 'claude.exe', 'git.exe', 'git-remote-https.exe', 'ssh.exe', 'scp.exe'];
+    for (const a of claudeApps) {
+      try { await removePolicy(`Claude_${a.replace('.exe', '')}`); } catch (e) {}
+    }
+    for (const appName of claudeApps) {
+      await createPolicy({
+        name: `Claude_${appName.replace('.exe', '')}`,
+        appPath: appName,
+        uploadLimitMbps: limitMbps,
+        downloadLimitMbps: 0,
+      });
+    }
+  } else {
+    // macOS/Linux: single global limit (per-app not supported)
+    try { await removePolicy('Claude_global'); } catch (e) {}
     await createPolicy({
-      name: `Claude_${appName.replace('.exe', '')}`,
-      appPath: appName,
+      name: 'Claude_global',
+      appPath: null,
       uploadLimitMbps: limitMbps,
       downloadLimitMbps: 0,
     });
@@ -757,7 +1451,13 @@ ipcMain.handle('quick-setup', async (_, { uploadCapPercent }) => {
     mainWindow.hide();
   }
 
-  return { status: 'ok', speed, percent, limitMbps };
+  return {
+    status: 'ok',
+    speed,
+    percent,
+    limitMbps,
+    ...(platform !== 'win32' ? { note: 'Per-app limiting is only available on Windows. A global upload limit has been applied.' } : {}),
+  };
 });
 
 // ============================================================
@@ -859,9 +1559,23 @@ ipcMain.handle('self-elevate', async () => {
   const exePath = process.execPath;
   const appPath = app.getAppPath();
   try {
-    await runPowerShell(
-      `Start-Process '${exePath}' -ArgumentList '"${appPath}"' -Verb RunAs`
-    );
+    if (platform === 'win32') {
+      await runPowerShell(
+        `Start-Process '${exePath}' -ArgumentList '"${appPath}"' -Verb RunAs`
+      );
+    } else if (platform === 'darwin') {
+      // macOS: relaunch with admin privileges via osascript
+      const launchCmd = exePath.includes('electron')
+        ? `\\"${exePath}\\" \\"${appPath}\\"`
+        : `open \\"${exePath}\\"`;
+      await runShell(
+        `osascript -e 'do shell script "${launchCmd}" with administrator privileges'`
+      );
+    } else if (platform === 'linux') {
+      // Linux: relaunch with pkexec for graphical sudo
+      const launchArgs = exePath.includes('electron') ? `"${exePath}" "${appPath}"` : `"${exePath}"`;
+      await runShell(`pkexec ${launchArgs} &`);
+    }
     app.isQuitting = true;
     app.quit();
     return { status: 'ok' };
@@ -878,7 +1592,11 @@ ipcMain.handle('save-settings', (_, settings) => {
 
 ipcMain.handle('kill-process', async (_, pid) => {
   try {
-    await runPowerShell(`Stop-Process -Id ${pid} -Force -ErrorAction Stop`);
+    if (platform === 'win32') {
+      await runPowerShell(`Stop-Process -Id ${pid} -Force -ErrorAction Stop`);
+    } else {
+      await runShell(`kill -9 ${pid}`);
+    }
     return { status: 'ok' };
   } catch (e) {
     return { status: 'error', message: e.message };
@@ -886,6 +1604,8 @@ ipcMain.handle('kill-process', async (_, pid) => {
 });
 
 ipcMain.handle('set-auto-start', (_, enabled) => setAutoStart(enabled));
+
+ipcMain.handle('get-platform', () => platform);
 
 // --- Launchers ---
 
@@ -916,19 +1636,42 @@ ipcMain.handle('launch-claude', (_, { id, promptText }) => {
   const launcher = launchers.find(l => l.id === id);
   if (!launcher) return { status: 'error', message: 'Launcher not found' };
 
-  const folder = launcher.folder.replace(/\//g, '\\');
   const args = launcher.claudeArgs || '--dangerously-skip-permissions';
 
   let cmd;
-  if (promptText) {
-    cmd = `start cmd.exe /k "cd /d ${folder} && echo Prompt copied to clipboard. && claude ${args}"`;
-    const { clipboard } = require('electron');
-    clipboard.writeText(promptText);
+  if (platform === 'win32') {
+    const folder = launcher.folder.replace(/\//g, '\\');
+    if (promptText) {
+      cmd = `start cmd.exe /k "cd /d ${folder} && echo Prompt copied to clipboard. && claude ${args}"`;
+      const { clipboard } = require('electron');
+      clipboard.writeText(promptText);
+    } else {
+      cmd = `start cmd.exe /k "cd /d ${folder} && claude ${args}"`;
+    }
+  } else if (platform === 'darwin') {
+    // macOS: open a new Terminal.app window
+    const folder = launcher.folder;
+    if (promptText) {
+      const { clipboard } = require('electron');
+      clipboard.writeText(promptText);
+    }
+    const escapedFolder = folder.replace(/'/g, "'\\''");
+    const termCmd = `cd '${escapedFolder}' && claude ${args}`;
+    cmd = `osascript -e 'tell application "Terminal" to do script "${termCmd.replace(/"/g, '\\"')}"'`;
   } else {
-    cmd = `start cmd.exe /k "cd /d ${folder} && claude ${args}"`;
+    // Linux: try common terminal emulators
+    const folder = launcher.folder;
+    if (promptText) {
+      const { clipboard } = require('electron');
+      clipboard.writeText(promptText);
+    }
+    const escapedFolder = folder.replace(/'/g, "'\\''");
+    const innerCmd = `cd '${escapedFolder}' && claude ${args}`;
+    // Try x-terminal-emulator (Debian/Ubuntu default), then xterm as fallback
+    cmd = `x-terminal-emulator -e bash -c '${innerCmd.replace(/'/g, "'\\''")}; exec bash' 2>/dev/null || xterm -e bash -c '${innerCmd.replace(/'/g, "'\\''")}; exec bash' 2>/dev/null`;
   }
 
-  exec(cmd, { windowsHide: false, shell: true }, (err) => {
+  exec(cmd, { windowsHide: false, shell: platform === 'win32' ? true : '/bin/bash' }, (err) => {
     if (err) console.error('Launch error:', err.message);
   });
 

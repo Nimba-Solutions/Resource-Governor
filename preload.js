@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('api', {
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
   killProcess: (pid) => ipcRenderer.invoke('kill-process', pid),
   setAutoStart: (v) => ipcRenderer.invoke('set-auto-start', v),
+  getPlatform: () => ipcRenderer.invoke('get-platform'),
 
   // --- Launchers ---
   getLaunchers: () => ipcRenderer.invoke('get-launchers'),
