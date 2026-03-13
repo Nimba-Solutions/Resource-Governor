@@ -53,6 +53,9 @@ let isBandwidthEnabled = store.get('bandwidthEnabled', true);
 // Track active CPU/memory limiters (child processes)
 const activeLimiters = new Map(); // ruleId -> { interval, rule }
 
+// Global busy flag — serialise ALL rule applications so PowerShell calls don't pile up
+let globalApplying = false;
+
 // ============================================================
 // TRAY ICON — gradient style based on active state
 // ============================================================
@@ -1101,8 +1104,10 @@ function startRule(rule) {
 
   let applying = false;
   const apply = async () => {
-    if (applying) return; // prevent overlapping — if previous apply is still running, skip
+    if (applying) return;      // per-rule busy — skip if previous apply still running
+    if (globalApplying) return; // global busy — another rule's apply is in progress
     applying = true;
+    globalApplying = true;
     try {
       if (rule.cpuPercent && rule.cpuPercent < 100) {
         await applyCpuLimit(rule.processName, rule.cpuPercent);
@@ -1111,11 +1116,12 @@ function startRule(rule) {
         await applyMemoryLimit(rule.processName, rule.memoryMb);
       }
     } catch (e) { /* guard will handle limits */ }
+    globalApplying = false;
     applying = false;
   };
 
   apply();
-  const interval = setInterval(apply, 5000);
+  const interval = setInterval(apply, 15000);
   activeLimiters.set(rule.id, { interval, rule });
   updateTrayMenu();
   notifyRenderer();
