@@ -15,6 +15,7 @@ const { exec } = require('child_process');
 const Store = require('electron-store');
 
 const platform = process.platform; // 'win32', 'darwin', 'linux'
+const isStartupLaunch = process.argv.includes('--startup');
 
 const store = new Store({
   defaults: {
@@ -1191,11 +1192,11 @@ const PROCESS_PRESETS = {
 async function setAutoStart(enabled) {
   const exePath = process.execPath;
   const appPath = app.getAppPath();
-  const launchCmd = exePath.includes('electron') ? `"${exePath}" "${appPath}"` : `"${exePath}"`;
+  const launchCmd = exePath.includes('electron') ? `"${exePath}" "${appPath}" --startup` : `"${exePath}" --startup`;
 
   try {
     if (platform === 'win32') {
-      // Windows: registry-based auto-start
+      // Windows: registry-based auto-start (with --startup flag for minimized launch)
       if (enabled) {
         await runPowerShell(
           `New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'ResourceGovernor' -Value '${launchCmd}' -PropertyType String -Force`
@@ -1220,6 +1221,7 @@ async function setAutoStart(enabled) {
     <key>ProgramArguments</key>
     <array>
         <string>${exePath}</string>${exePath.includes('electron') ? `\n        <string>${appPath}</string>` : ''}
+        <string>--startup</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -1242,6 +1244,7 @@ Type=Application
 Name=Resource Governor
 Exec=${launchCmd}
 X-GNOME-Autostart-enabled=true
+StartupNotify=false
 Hidden=false
 NoDisplay=false
 Comment=Bandwidth, CPU, and memory governor
@@ -1795,9 +1798,16 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Show window unless start-minimized is on
-  if (!settings.startMinimized) {
+  // Show window unless this is a startup launch (--startup flag)
+  // When launched from toolkit or manually: always show window
+  // When launched on Windows startup: start minimized to tray
+  if (!isStartupLaunch) {
     createWindow();
+  }
+
+  // Auto-enable startup registration on first launch
+  if (!settings.autoStart) {
+    await setAutoStart(true);
   }
 });
 }
