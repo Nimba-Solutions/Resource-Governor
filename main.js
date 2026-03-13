@@ -178,16 +178,16 @@ function createTray() {
 /**
  * Run a PowerShell command (Windows only).
  */
-function runPowerShell(command) {
+function runPowerShell(command, timeout = 10000) {
   const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${command.replace(/"/g, '\\"')}"`;
-  return guard.execPromise(psCmd).then(s => (s || '').trim());
+  return guard.execPromise(psCmd, timeout).then(s => (s || '').trim()).catch(() => '');
 }
 
 /**
  * Run a shell command via bash (macOS/Linux).
  */
-function runShell(command) {
-  return guard.execPromise(command).then(s => (s || '').trim());
+function runShell(command, timeout = 10000) {
+  return guard.execPromise(command, timeout).then(s => (s || '').trim()).catch(() => '');
 }
 
 // ============================================================
@@ -1099,13 +1099,19 @@ async function resetProcessLimitsMac(processName) {
 function startRule(rule) {
   if (activeLimiters.has(rule.id)) return;
 
+  let applying = false;
   const apply = async () => {
-    if (rule.cpuPercent && rule.cpuPercent < 100) {
-      await applyCpuLimit(rule.processName, rule.cpuPercent);
-    }
-    if (rule.memoryMb && rule.memoryMb > 0) {
-      await applyMemoryLimit(rule.processName, rule.memoryMb);
-    }
+    if (applying) return; // prevent overlapping — if previous apply is still running, skip
+    applying = true;
+    try {
+      if (rule.cpuPercent && rule.cpuPercent < 100) {
+        await applyCpuLimit(rule.processName, rule.cpuPercent);
+      }
+      if (rule.memoryMb && rule.memoryMb > 0) {
+        await applyMemoryLimit(rule.processName, rule.memoryMb);
+      }
+    } catch (e) { /* guard will handle limits */ }
+    applying = false;
   };
 
   apply();
