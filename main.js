@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { exec } = require('child_process');
+const guard = require('./process-guard');
 const Store = require('electron-store');
 
 const platform = process.platform; // 'win32', 'darwin', 'linux'
@@ -178,25 +179,15 @@ function createTray() {
  * Run a PowerShell command (Windows only).
  */
 function runPowerShell(command) {
-  return new Promise((resolve, reject) => {
-    const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${command.replace(/"/g, '\\"')}"`;
-    exec(psCmd, { windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout.trim());
-    });
-  });
+  const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${command.replace(/"/g, '\\"')}"`;
+  return guard.execPromise(psCmd).then(s => (s || '').trim());
 }
 
 /**
  * Run a shell command via bash (macOS/Linux).
  */
 function runShell(command) {
-  return new Promise((resolve, reject) => {
-    exec(command, { shell: '/bin/bash', maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout.trim());
-    });
-  });
+  return guard.execPromise(command).then(s => (s || '').trim());
 }
 
 // ============================================================
@@ -684,7 +675,7 @@ async function runSpeedTest() {
   try {
     const dlResult = await new Promise((resolve, reject) => {
       const testSize = 10000000;
-      exec(
+      guard.exec(
         `curl -s -o ${nullDev} -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=${testSize}"`,
         hideOpts,
         (err, stdout) => {
@@ -704,7 +695,7 @@ async function runSpeedTest() {
       const tempFile = path.join(app.getPath('temp'), 'rg-speedtest.bin');
       fs.writeFileSync(tempFile, Buffer.alloc(2000000, 0x41));
 
-      exec(
+      guard.exec(
         `curl -s -w "%{speed_upload}" -X POST -F "file=@${tempFile.replace(/\\/g, '/')}" "https://speed.cloudflare.com/__up" -o ${nullDev}`,
         hideOpts,
         (err, stdout) => {
@@ -1674,7 +1665,7 @@ ipcMain.handle('launch-claude', (_, { id, promptText }) => {
     cmd = `x-terminal-emulator -e bash -c '${innerCmd.replace(/'/g, "'\\''")}; exec bash' 2>/dev/null || xterm -e bash -c '${innerCmd.replace(/'/g, "'\\''")}; exec bash' 2>/dev/null`;
   }
 
-  exec(cmd, { windowsHide: false, shell: platform === 'win32' ? true : '/bin/bash' }, (err) => {
+  guard.exec(cmd, { windowsHide: false, shell: platform === 'win32' ? true : '/bin/bash' }, (err) => {
     if (err) console.error('Launch error:', err.message);
   });
 
@@ -1777,6 +1768,7 @@ if (!gotLock) {
 
 if (gotLock) {
 app.whenReady().then(async () => {
+  guard.init(app);
   createTray();
 
   const settings = store.get('settings');
